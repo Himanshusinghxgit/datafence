@@ -1,0 +1,30 @@
+# Kubernetes Ingress for DataFence API
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: datafence-api
+  namespace: datafence
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+  labels:
+    app: datafence
+spec:
+  tls:
+  - hosts:
+    - datafence-api.example.com
+    secretName: datafence-api-tls
+  rules:
+  - host: datafence-api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: datafence-api
+            port:
+              number: 80

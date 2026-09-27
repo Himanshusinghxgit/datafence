@@ -1,0 +1,40 @@
+# Kubernetes Service for DataFence API
+apiVersion: v1
+kind: Service
+metadata:
+  name: datafence-api
+  namespace: datafence
+  labels:
+    app: datafence
+    component: api
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: http
+    protocol: TCP
+    name: http
+  selector:
+    app: datafence
+    component: api
+---
+# Headless service for StatefulSet (if needed)
+apiVersion: v1
+kind: Service
+metadata:
+  name: datafence-api-headless
+  namespace: datafence
+  labels:
+    app: datafence
+    component: api
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+  - port: 8000
+    targetPort: http
+    protocol: TCP
+    name: http
+  selector:
+    app: datafence
+    component: api

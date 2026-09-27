@@ -1,0 +1,27 @@
+version: "1"
+
+policy:
+  name: basic-example
+  
+  resources:
+    users:
+      operations:
+        allow:
+          - read
+        deny:
+          - insert
+          - update
+          - delete
+      
+      fields:
+        allow:
+          - user_id
+          - username
+          - email
+          - created_at
+        deny:
+          - password_hash
+          - api_key
+      
+      limits:
+        max_rows: 100
