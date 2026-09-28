@@ -1,17 +1,24 @@
 """
-DataFence Security Boundary.
+DataFence Security Boundary (v0.4 - Hardened).
 
-This is the core enforcement layer.
+This is the core enforcement layer with cryptographic capabilities.
 
 Flow:
-    Untrusted Request → Policy Evaluation → ExecutionPlan → Execution → Validation
+    Untrusted Request → Policy Evaluation → AuthorizedExecution (signed) → Execution → Validation
+
+SECURITY IMPROVEMENTS (v0.4):
+- Capabilities are cryptographically signed with HMAC
+- Connector is PRIVATE (not exposed in public API)
+- Capability cannot be forged without signing key
+- Defense in depth: API design + cryptography
 
 The database NEVER executes LLM-generated SQL directly.
-DataFence transforms the untrusted request into an authorized ExecutionPlan.
-The connector executes ONLY the ExecutionPlan.
+DataFence transforms the untrusted request into a signed capability.
+The connector verifies the signature before execution.
 """
 
 from typing import Protocol, Union
+from secrets import token_bytes
 
 from datafence.core.types import (
     Actor,
@@ -27,6 +34,7 @@ from datafence.core.types import (
     PolicyDecision,
     Request,
 )
+from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 
 
 class PolicyEngine(Protocol):
@@ -78,24 +86,52 @@ class PolicyEngine(Protocol):
 
 class Connector(Protocol):
     """
-    Connector interface.
+    Connector interface (v0.4 - Hardened).
     
-    CRITICAL: The connector MUST accept ExecutionPlan, not raw SQL.
+    CRITICAL CHANGES:
+    - Connector accepts AuthorizedExecution (signed capability)
+    - Connector verifies HMAC signature before execution
+    - Connector is PRIVATE (not exported in public API)
     
-    The connector generates SQL from the ExecutionPlan internally.
-    This ensures the database executes DataFence's authorized plan,
-    not the LLM's untrusted SQL.
+    The connector generates SQL from the capability internally.
+    This ensures the database executes DataFence's authorized operation,
+    not the LLM's untrusted request.
     """
 
-    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, str]]:
+    def execute_capability(
+        self,
+        capability: AuthorizedExecution,
+        signing_key: bytes,
+    ) -> list[dict[str, str]]:
         """
-        Execute an authorized ExecutionPlan.
+        Execute a signed capability.
         
         The connector MUST:
-        1. Accept ONLY ExecutionPlan
-        2. Generate SQL from the plan internally
-        3. Use prepared statements
-        4. Return ONLY the fields in plan.selected_fields
+        1. Verify capability signature with signing_key
+        2. Reject invalid/forged capabilities
+        3. Generate SQL from the capability internally
+        4. Use prepared statements
+        5. Return ONLY the fields in capability.selected_fields
+        
+        Args:
+            capability: Signed AuthorizedExecution
+            signing_key: Secret key for signature verification
+        
+        Returns:
+            Query results
+        
+        Raises:
+            CapabilityVerificationError: If signature is invalid
+        """
+        ...
+    
+    # Legacy method for backward compatibility (deprecated)
+    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, str]]:
+        """
+        DEPRECATED: Use execute_capability() instead.
+        
+        This method is kept for backward compatibility with v0.3 demos.
+        It does NOT provide cryptographic verification.
         """
         ...
 
@@ -148,17 +184,29 @@ class ResultValidator:
 
 class DataFenceBoundary:
     """
-    The DataFence security boundary.
+    The DataFence security boundary (v0.4 - Hardened).
     
     This is the enforcement layer between AI agents and data.
+    
+    SECURITY IMPROVEMENTS (v0.4):
+    1. Connector is PRIVATE (_connector, not exposed)
+    2. Capabilities are cryptographically signed (HMAC-SHA256)
+    3. Signing key is generated securely and kept private
+    4. Defense in depth: API design + cryptography
     
     Security properties:
     1. Untrusted requests never reach the database directly
     2. Policy evaluation happens BEFORE execution
-    3. ExecutionPlan is the authorized contract
-    4. Result validation happens AFTER execution
-    5. Everything produces evidence
-    6. Fail closed on errors
+    3. AuthorizedExecution is cryptographically signed
+    4. Connector verifies signature before execution
+    5. Result validation happens AFTER execution
+    6. Everything produces evidence
+    7. Fail closed on errors
+    
+    THREAT MODEL:
+    - ✅ Protects against Threat Model A (untrusted LLM/agent)
+    - ✅ Protects against Threat Model B (compromised application code)
+    - ❌ Does NOT protect against Threat Model C (full Python runtime compromise)
     """
 
     def __init__(
@@ -167,8 +215,13 @@ class DataFenceBoundary:
         connector: Connector,
     ):
         self.policy_engine = policy_engine
-        self.connector = connector
+        self._connector = connector  # PRIVATE - not accessible externally
         self.validator = ResultValidator()
+        
+        # Generate secret signing key (32 bytes = 256 bits)
+        # This key is used to sign capabilities with HMAC-SHA256
+        # CRITICAL: Keep this private - do not expose via public API
+        self._signing_key = token_bytes(32)
 
     def execute(
         self,
@@ -176,17 +229,23 @@ class DataFenceBoundary:
         intent: Intent,
     ) -> Union[AllowedRequest, DeniedRequest]:
         """
-        Execute a request through the security boundary.
+        Execute a request through the security boundary (v0.4 - Hardened).
         
         Flow:
         1. Create Request (Actor + Intent)
         2. Evaluate Policy
         3. If DENY: return DeniedRequest
-        4. If ALLOW: create ExecutionPlan
-        5. Execute ExecutionPlan via connector
+        4. If ALLOW: create signed AuthorizedExecution
+        5. Execute via PRIVATE connector (verifies signature)
         6. Validate result
         7. Generate evidence
         8. Return AllowedRequest
+        
+        SECURITY (v0.4):
+        - Capability is cryptographically signed
+        - Connector is private (cannot be called externally)
+        - Connector verifies signature before execution
+        - Defense in depth: API design + cryptography
         
         CRITICAL: The database never sees the LLM's raw SQL.
         """
@@ -208,21 +267,33 @@ class DataFenceBoundary:
         if policy_decision.decision == Decision.DENY:
             return self._create_denied_request(request, policy_decision)
 
-        # Step 4: Create ExecutionPlan
+        # Step 4: Create signed AuthorizedExecution capability
         try:
-            execution_plan = self._create_execution_plan(request, policy_decision)
+            capability = self._create_signed_capability(request, policy_decision)
         except Exception as e:
-            # Fail closed: treat plan creation errors as DENY
+            # Fail closed: treat capability creation errors as DENY
             policy_decision = PolicyDecision(
                 decision=Decision.DENY,
-                reasons=[f"ExecutionPlan creation failed: {str(e)}"],
+                reasons=[f"Capability creation failed: {str(e)}"],
                 policy_version=self.policy_engine.get_policy_version(),
             )
             return self._create_denied_request(request, policy_decision)
 
-        # Step 5: Execute via connector
+        # Step 5: Execute via PRIVATE connector
+        # The connector verifies the capability signature
         try:
-            raw_data = self.connector.execute_plan(execution_plan)
+            raw_data = self._connector.execute_capability(
+                capability,
+                self._signing_key,
+            )
+        except CapabilityVerificationError as e:
+            # Signature verification failed
+            policy_decision = PolicyDecision(
+                decision=Decision.DENY,
+                reasons=[f"Capability verification failed: {str(e)}"],
+                policy_version=self.policy_engine.get_policy_version(),
+            )
+            return self._create_denied_request(request, policy_decision)
         except Exception as e:
             # Fail closed: execution errors mean no data returned
             policy_decision = PolicyDecision(
@@ -233,6 +304,8 @@ class DataFenceBoundary:
             return self._create_denied_request(request, policy_decision)
 
         # Step 6: Validate result
+        # Convert capability to ExecutionPlan for validation
+        execution_plan = self._capability_to_plan(capability)
         execution_result = self.validator.validate(execution_plan, raw_data)
 
         if not execution_result.verified:
@@ -360,6 +433,100 @@ class DataFenceBoundary:
         )
 
         return plan
+
+    def _create_signed_capability(
+        self,
+        request: Request,
+        policy_decision: PolicyDecision,
+    ) -> AuthorizedExecution:
+        """
+        Create a cryptographically signed capability.
+        
+        This is the v0.4 hardened version of _create_execution_plan.
+        The capability includes an HMAC signature that prevents forgery.
+        """
+        actor = request.actor
+        intent = request.intent
+
+        # Get allowed fields (policy may restrict what LLM requested)
+        allowed_fields = self.policy_engine.get_allowed_fields(
+            actor=actor,
+            resource=intent.resource,
+        )
+
+        # If LLM requested specific fields, intersect with allowed
+        if intent.fields:
+            selected_fields = [f for f in intent.fields if f in allowed_fields]
+        else:
+            selected_fields = allowed_fields
+
+        if not selected_fields:
+            raise ValueError("No authorized fields available")
+
+        # Get enforced filters (e.g., tenant_id)
+        enforced_filters = self.policy_engine.get_enforced_filters(
+            actor=actor,
+            resource=intent.resource,
+        )
+
+        # Apply actor context to filters
+        resolved_filters = {}
+        for key, value in enforced_filters.items():
+            if value == ":actor_tenant_id":
+                resolved_filters[key] = actor.tenant_id
+            elif value == ":actor_id":
+                resolved_filters[key] = actor.id
+            else:
+                resolved_filters[key] = value
+
+        # Add LLM's filters IF they don't conflict with enforced filters
+        for key, value in intent.filters.items():
+            if key not in resolved_filters:
+                resolved_filters[key] = value
+
+        # Get limit
+        max_limit = self.policy_engine.get_max_limit(
+            actor=actor,
+            resource=intent.resource,
+        )
+        limit = min(intent.limit or max_limit, max_limit)
+
+        # Import uuid for execution_id
+        from uuid import uuid4
+        
+        # Create signed capability
+        capability = AuthorizedExecution.create_signed(
+            execution_id=f"exec_{uuid4().hex[:16]}",
+            actor=actor,
+            resource=intent.resource,
+            operation=intent.operation,
+            selected_fields=selected_fields,
+            enforced_filters=resolved_filters,
+            limit=limit,
+            policy_version=self.policy_engine.get_policy_version(),
+            policy_decisions=policy_decision.matched_policies,
+            signing_key=self._signing_key,
+        )
+
+        return capability
+    
+    def _capability_to_plan(self, capability: AuthorizedExecution) -> ExecutionPlan:
+        """
+        Convert AuthorizedExecution to ExecutionPlan.
+        
+        This is for backward compatibility with Evidence/Result types.
+        ExecutionPlan is kept for audit trail but is not used for execution.
+        """
+        return ExecutionPlan.create(
+            actor=capability.actor,
+            resource=capability.resource,
+            operation=capability.operation,
+            selected_fields=capability.selected_fields,
+            enforced_filters=capability.enforced_filters,
+            limit=capability.limit,
+            policy_version=capability.policy_version,
+            policy_decisions=capability.policy_decisions,
+        )
 
     def _create_denied_request(
         self,

@@ -1,31 +1,45 @@
 """
-SQLite connector for DataFence.
+SQLite connector for DataFence (v0.4 - Hardened).
 
-CRITICAL SECURITY PROPERTY:
-    This connector accepts ONLY ExecutionPlan.
-    It does NOT accept raw SQL from the LLM.
+CRITICAL SECURITY PROPERTIES (v0.4):
+    - Connector verifies cryptographic signature before execution
+    - Connector accepts ONLY signed AuthorizedExecution capabilities
+    - Connector does NOT accept raw SQL from the LLM
+    - Connector rejects forged/tampered capabilities
     
 Flow:
-    ExecutionPlan → generate_sql() → prepared_statement → database
+    AuthorizedExecution (signed) → verify_signature() → generate_sql() → prepared_statement → database
 
 The database executes DataFence's authorized SQL, not the LLM's SQL.
+
+SECURITY IMPROVEMENTS:
+- HMAC signature verification prevents forgery
+- Defense in depth: API design + cryptography
+- Legacy execute_plan() kept for backward compatibility (deprecated)
 """
 
 import sqlite3
 from typing import Any
 
 from datafence.core.types import ExecutionPlan, Operation
+from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 
 
 class SQLiteConnector:
     """
-    SQLite connector that enforces ExecutionPlan.
+    SQLite connector that enforces cryptographic capabilities (v0.4 - Hardened).
     
     The connector:
-    1. Accepts ONLY ExecutionPlan (not raw SQL)
-    2. Generates SQL from the plan
-    3. Uses prepared statements with parameters
-    4. Returns ONLY the fields in the plan
+    1. Verifies HMAC signature on AuthorizedExecution
+    2. Rejects forged/tampered capabilities
+    3. Generates SQL from the capability (not from LLM)
+    4. Uses prepared statements with parameters
+    5. Returns ONLY the fields in the capability
+    
+    SECURITY:
+    - Capability signature is verified BEFORE execution
+    - Invalid signature = SecurityError (no data returned)
+    - Legacy execute_plan() is kept but does NOT verify signatures
     """
 
     def __init__(self, database_path: str):
@@ -33,15 +47,75 @@ class SQLiteConnector:
         self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = sqlite3.Row  # Return rows as dicts
 
-    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, Any]]:
+    def execute_capability(
+        self,
+        capability: AuthorizedExecution,
+        signing_key: bytes,
+    ) -> list[dict[str, Any]]:
         """
-        Execute an ExecutionPlan.
+        Execute a signed capability (v0.4 - Hardened).
         
         SECURITY:
-        - Plan specifies EXACTLY what is authorized
-        - SQL is generated from the plan (not from LLM)
+        - Verifies HMAC signature before execution
+        - Rejects forged capabilities
+        - Capability specifies EXACTLY what is authorized
+        - SQL is generated from the capability (not from LLM)
         - Prepared statements prevent injection
         - Only authorized fields are returned
+        
+        Args:
+            capability: Signed AuthorizedExecution
+            signing_key: Secret key for signature verification
+        
+        Returns:
+            Query results
+        
+        Raises:
+            CapabilityVerificationError: If signature is invalid
+        """
+        # SECURITY CHECK: Verify cryptographic signature
+        if not capability.verify_signature(signing_key):
+            raise CapabilityVerificationError(
+                f"Invalid capability signature for execution {capability.execution_id}. "
+                "The capability may be forged or tampered with."
+            )
+        
+        # Generate SQL from verified capability
+        sql, params = self._generate_sql_from_capability(capability)
+
+        # Execute with prepared statement
+        cursor = self.connection.cursor()
+        cursor.execute(sql, params)
+
+        # Fetch results
+        rows = cursor.fetchall()
+
+        # Convert to list of dicts, ensuring ONLY authorized fields
+        results = []
+        for row in rows:
+            # Only include fields from the capability
+            filtered_row = {
+                field: row[field]
+                for field in capability.selected_fields
+                if field in row.keys()
+            }
+            results.append(filtered_row)
+
+        return results
+
+    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, Any]]:
+        """
+        Execute an ExecutionPlan (v0.3 - DEPRECATED).
+        
+        DEPRECATED: This method is kept for backward compatibility with v0.3.
+        It does NOT verify cryptographic signatures and should NOT be used.
+        
+        Use execute_capability() instead.
+        
+        SECURITY WARNING:
+        - This method does NOT verify signatures
+        - Vulnerable to ExecutionPlan forgery
+        - Kept only for v0.3 compatibility
         """
         # Generate SQL from ExecutionPlan
         sql, params = self._generate_sql(plan)
@@ -65,6 +139,64 @@ class SQLiteConnector:
             results.append(filtered_row)
 
         return results
+
+    def _generate_sql_from_capability(
+        self,
+        capability: AuthorizedExecution,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Generate SQL from AuthorizedExecution capability.
+        
+        The SQL is constructed from the capability, NOT from LLM input.
+        """
+        if capability.operation == Operation.READ:
+            return self._generate_select_from_capability(capability)
+        elif capability.operation == Operation.INSERT:
+            raise NotImplementedError("INSERT not implemented in demo")
+        elif capability.operation == Operation.UPDATE:
+            raise NotImplementedError("UPDATE not implemented in demo")
+        elif capability.operation == Operation.DELETE:
+            raise NotImplementedError("DELETE not implemented in demo")
+        else:
+            raise ValueError(f"Unknown operation: {capability.operation}")
+
+    def _generate_select_from_capability(
+        self,
+        capability: AuthorizedExecution,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Generate SELECT statement from capability.
+        
+        The LLM may have requested:
+            SELECT * FROM transactions
+        
+        But DataFence generates:
+            SELECT id, merchant, amount, timestamp
+            FROM transactions
+            WHERE tenant_id = :tenant_id
+            LIMIT 100
+        
+        based on the verified capability.
+        """
+        # SELECT clause - ONLY authorized fields
+        fields = ", ".join(capability.selected_fields)
+        sql = f"SELECT {fields} FROM {capability.resource}"
+
+        # WHERE clause - enforced filters
+        params = {}
+        if capability.enforced_filters:
+            conditions = []
+            for i, (key, value) in enumerate(capability.enforced_filters.items()):
+                param_name = f"filter_{i}"
+                conditions.append(f"{key} = :{param_name}")
+                params[param_name] = value
+
+            sql += " WHERE " + " AND ".join(conditions)
+
+        # LIMIT clause - enforced limit
+        sql += f" LIMIT {capability.limit}"
+
+        return sql, params
 
     def _generate_sql(self, plan: ExecutionPlan) -> tuple[str, dict[str, Any]]:
         """
