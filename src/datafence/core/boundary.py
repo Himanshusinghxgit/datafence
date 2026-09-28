@@ -488,7 +488,8 @@ class DataFenceBoundary:
             else:
                 resolved_filters[key] = value
 
-        # Add LLM's filters IF they don't conflict with enforced filters
+        # SECURITY INVARIANT: Policy filters win — user cannot widen scope.
+        # Only add user EQ filters on fields the policy has not constrained.
         for key, value in intent.filters.items():
             if key not in resolved_filters:
                 resolved_filters[key] = value
@@ -559,7 +560,12 @@ class DataFenceBoundary:
             # enforced_filter is already resolved (actor refs replaced with values)
             resolved_filters = raw_decision.enforced_filter.to_dict()
 
-            # Add intent filters that don't conflict with policy filters
+            # Add intent filters that don't conflict with policy filters.
+            # SECURITY INVARIANT: User predicates can NARROW an authorized scope,
+            # never widen it.  Policy-injected filters always take precedence.
+            # We only add user-supplied EQ predicates on fields the policy has
+            # not already constrained — we never allow OR expressions or NEQ on
+            # policy-controlled fields.
             for key, value in intent.filters.items():
                 if key not in resolved_filters:
                     resolved_filters[key] = value

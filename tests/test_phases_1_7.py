@@ -675,6 +675,7 @@ class TestAthenaConnectorInterface:
         assert AthenaConnector is not None
 
     def test_compile_select(self, signing_key):
+        pytest.importorskip("pyathena")
         from datafence.connectors.athena_connector import AthenaConnector
         import unittest.mock as mock
 
@@ -713,6 +714,7 @@ class TestSnowflakeConnectorInterface:
         assert SnowflakeConnector is not None
 
     def test_compile_select_with_schema(self, signing_key):
+        pytest.importorskip("snowflake.connector")
         from datafence.connectors.snowflake_connector import SnowflakeConnector
         import unittest.mock as mock
 
@@ -976,3 +978,104 @@ class TestLangChainTool:
         # Should see tenant_a data only (enforced by policy)
         if result["status"] == "allowed":
             assert result["row_count"] == 3  # tenant_a has 3 transactions
+
+
+# ===========================================================================
+# Resource Registry tests
+# ===========================================================================
+
+class TestResourceRegistry:
+
+    def test_create_banking_registry(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        assert registry.exists("transactions")
+        assert registry.exists("customers")
+        assert registry.exists("accounts")
+
+    def test_field_validation_passes(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        registry.validate_fields("transactions", ["id", "merchant", "amount"])
+
+    def test_field_validation_fails_unknown_field(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        with pytest.raises(ValueError, match="Unknown fields"):
+            registry.validate_fields("transactions", ["id", "nonexistent_field"])
+
+    def test_unknown_resource_rejected(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        with pytest.raises(ValueError, match="Unknown resource"):
+            registry.validate_fields("secret_table", ["id"])
+
+    def test_tenant_key_identified(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        resource = registry.get("transactions")
+        assert resource.tenant_key() == "tenant_id"
+
+    def test_restricted_fields_identified(self):
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+        resource = registry.get("transactions")
+        sensitive = resource.sensitive_fields()
+        assert "card_number" in sensitive
+        assert "merchant" not in sensitive
+
+    def test_registry_integrated_with_policy_engine(self):
+        """Policy engine with registry rejects unknown fields."""
+        from datafence.core.policy import create_banking_policy
+        engine = create_banking_policy(with_registry=True)
+        actor = Actor(id="u", tenant_id="t")
+        # Request a field that doesn't exist in schema
+        dec = engine.evaluate(actor, "transactions", "read",
+                              requested_fields=["id", "nonexistent"])
+        assert dec.is_deny
+
+    def test_registry_validates_resource_existence(self):
+        """Policy engine with registry rejects unknown resources."""
+        from datafence.core.policy import create_banking_policy
+        engine = create_banking_policy(with_registry=True)
+        actor = Actor(id="u", tenant_id="t")
+        dec = engine.evaluate(actor, "ghost_table", "read")
+        assert dec.is_deny
+
+
+# ===========================================================================
+# Security: filter merge invariant
+# ===========================================================================
+
+class TestFilterMergeInvariant:
+
+    def test_policy_filter_wins_over_intent_filter(self, boundary):
+        """Policy-injected tenant_id cannot be overridden by intent filters."""
+        actor = Actor(id="u", tenant_id="tenant_a")
+        # Intent tries to use tenant_b's filter
+        intent = Intent(
+            resource="transactions",
+            operation=Operation.READ,
+            fields=["id", "merchant"],
+            filters={"tenant_id": "tenant_b"},   # attempt to widen scope
+        )
+        result = boundary.execute(actor, intent)
+        # Should still be ALLOW (policy overrides the intent filter)
+        assert isinstance(result, AllowedRequest)
+        # But enforced_filters should have tenant_a (from policy, not tenant_b)
+        assert result.execution_plan.enforced_filters.get("tenant_id") == "tenant_a"
+
+    def test_user_filter_narrows_scope(self, boundary):
+        """A user filter on a non-policy field narrows results."""
+        actor = Actor(id="u", tenant_id="tenant_a")
+        intent = Intent(
+            resource="transactions",
+            operation=Operation.READ,
+            fields=["id", "merchant", "amount"],
+            filters={"merchant": "Amazon"},   # narrow — OK
+        )
+        result = boundary.execute(actor, intent)
+        assert isinstance(result, AllowedRequest)
+        # Only Amazon transactions
+        for row in result.execution_result.data:
+            assert row["merchant"] == "Amazon"

@@ -1,8 +1,18 @@
 """
-Snowflake connector for cloud data warehouse.
+DEPRECATED (v0.1-v0.4) Snowflake connector — legacy interface.
 
-Executes queries against Snowflake with connection pooling.
+⚠️  Use datafence.connectors.snowflake_connector.SnowflakeConnector instead.
+    That connector accepts signed AuthorizedExecution capabilities and
+    verifies HMAC before executing any query.
 """
+
+import warnings
+warnings.warn(
+    "datafence.connectors.snowflake (v0.1-v0.4 legacy) is deprecated. "
+    "Use datafence.connectors.snowflake_connector.SnowflakeConnector instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from typing import Any
 

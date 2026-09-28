@@ -1,8 +1,28 @@
 """
-PostgreSQL connector with connection pooling and prepared statements.
+DEPRECATED (v0.1-v0.4) PostgreSQL connector — legacy interface.
 
-Production-ready connector for PostgreSQL databases.
+⚠️  This connector uses the old ExecutionRequest interface and lacks the
+    v0.5 cryptographic capability model.  It is vulnerable to the same
+    connector-bypass attacks fixed in v0.4.
+
+Use datafence.connectors.postgres_connector.PostgreSQLConnector instead.
+That connector:
+  - Accepts only signed AuthorizedExecution capabilities
+  - Verifies HMAC before any query is built
+  - Validates all SQL identifiers
+
+This file is kept ONLY for backward compatibility with code that imports
+from datafence.connectors.postgres directly.
 """
+
+import warnings
+warnings.warn(
+    "datafence.connectors.postgres (v0.1-v0.4 legacy) is deprecated. "
+    "Use datafence.connectors.postgres_connector.PostgreSQLConnector "
+    "for the v0.5 capability-verified interface.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from typing import Any
 

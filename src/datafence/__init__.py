@@ -86,8 +86,20 @@ from datafence.core.policy import (
     create_banking_policy,
 )
 
-# Capability
-from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
+# Resource Registry
+from datafence.core.registry import (
+    DataClassification,
+    FieldDefinition,
+    ResourceDefinition,
+    ResourceRegistry,
+    create_banking_registry,
+)
+
+# Capability — INTERNAL, not for application code
+# AuthorizedExecution is created only by DataFenceBoundary.
+# Applications should never construct or inspect capabilities directly.
+# Exported here for testing and advanced integration use ONLY.
+from datafence.core.capability import CapabilityVerificationError
 
 # ---------------------------------------------------------------------------
 # Legacy v0.1–v0.4 API (deprecated — kept for backward compatibility)
@@ -154,8 +166,14 @@ __all__ = [
     "YAMLPolicyLoader",
     "create_banking_policy",
 
-    # Capability
-    "AuthorizedExecution",
+    # Resource Registry
+    "ResourceRegistry",
+    "ResourceDefinition",
+    "FieldDefinition",
+    "DataClassification",
+    "create_banking_registry",
+
+    # Capability (error only — AuthorizedExecution is internal)
     "CapabilityVerificationError",
 
     # ===== Legacy API (deprecated) =====

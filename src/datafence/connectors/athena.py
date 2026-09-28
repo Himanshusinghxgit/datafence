@@ -1,8 +1,18 @@
 """
-Amazon Athena connector for data lake queries.
+DEPRECATED (v0.1-v0.4) Athena connector — legacy interface.
 
-Executes SQL queries against S3 data using AWS Athena.
+⚠️  Use datafence.connectors.athena_connector.AthenaConnector instead.
+    That connector accepts signed AuthorizedExecution capabilities and
+    verifies HMAC before executing any query.
 """
+
+import warnings
+warnings.warn(
+    "datafence.connectors.athena (v0.1-v0.4 legacy) is deprecated. "
+    "Use datafence.connectors.athena_connector.AthenaConnector instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from typing import Any
 from time import sleep

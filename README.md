@@ -1,260 +1,278 @@
-# DataFence v0.4.0
+# DataFence v0.5.0
 
-**A deterministic authorization boundary for AI access to enterprise data.**
+**Policy-Enforced Data Execution for AI.**
 
-[![Version](https://img.shields.io/badge/version-0.4.0-orange.svg)](https://github.com/yourusername/datafence/releases)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/Himanshusinghxgit/datafence)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Status: Prototype](https://img.shields.io/badge/status-prototype-orange.svg)]()
+
+---
+
+## What DataFence does
+
+An AI agent never gets database access. It gets the ability to **propose an operation**.
+
+DataFence decides whether that proposal becomes an executable capability:
+
+```
+                 AI AGENT
+                     │
+                   Intent (untrusted)
+                     │
+                     ▼
+          ┌────────────────────┐
+          │      DATAFENCE     │
+          │                    │
+          │  Principal Context │
+          │         ↓          │
+          │  Resource Registry │
+          │         ↓          │
+          │  Policy Decision   │
+          │         ↓          │
+          │  Execution IR      │
+          │         ↓          │
+          │  Signed Capability │
+          └─────────┬──────────┘
+                    │
+                    ▼
+              DATA CONNECTOR
+                    │
+              compiled query
+                    │
+                    ▼
+              DATABASE / LAKE
+                    │
+                    ▼
+              RESULT VALIDATOR
+                    │
+          ┌─────────┴──────────┐
+          ▼                    ▼
+       RESULT               EVIDENCE
+```
+
+**Core principle:** The model proposes. DataFence decides.
+
+---
 
 ## Status: Prototype
 
-DataFence v0.4 is a **security-hardened prototype**. The core authorization boundary is operational and tested, but this is not production-ready software.
+DataFence v0.5 is an architectural prototype. The core security boundary is
+operational and tested, but this is **not production-ready software**.
 
-## The Problem
-
-AI agents need access to enterprise data. But:
-- LLMs can hallucinate queries
-- Agents can request unauthorized data
-- Models can cross tenant boundaries
-- Probabilistic systems need deterministic controls
-
-## The Solution
-
-```
-    AI Agent
-       │
-       ├─ "Show me transactions"
-       ▼
-  DataFence Boundary
-       │
-       ├─ Policy Evaluation
-       ├─ Create Signed Capability
-       ├─ Execute & Validate
-       ▼
-    Database
-```
-
-**Core Principle:** The model proposes. DataFence decides.
+---
 
 ## Quick Start
 
 ```python
 from datafence.core.boundary import DataFenceBoundary
+from datafence.core.policy import create_banking_policy
+from datafence.connectors.sqlite_connector import create_demo_database
 from datafence.core.types import Actor, Intent, Operation
-from datafence.core.policy_engine import create_banking_demo_policy
-from datafence.connectors.sqlite_connector import SQLiteConnector
 
-# Create boundary (v0.4 uses factory method)
+# One factory call wires up the boundary + connector with a shared signing key
 boundary = DataFenceBoundary.create(
-    policy_engine=create_banking_demo_policy(),
-    connector_factory=SQLiteConnector,
-    database_path="data.db"
+    policy_engine=create_banking_policy(),
+    connector_factory=create_demo_database,
+    database_path="data.db",
 )
 
-# AI agent request
+# AI agent proposes an operation (untrusted)
 actor = Actor(id="agent:finance", tenant_id="acme-corp")
 intent = Intent(
     resource="transactions",
     operation=Operation.READ,
-    fields=["id", "merchant", "amount"]
+    fields=["id", "merchant", "amount"],
 )
 
-# Execute through boundary
 result = boundary.execute(actor, intent)
 
-if hasattr(result, 'execution_result'):
-    print(f"Allowed: {result.execution_result.row_count} rows")
+if hasattr(result, "execution_result"):
+    print(f"Allowed — {result.execution_result.row_count} rows")
 else:
-    print(f"Denied: {result.decision.reasons}")
+    print(f"Denied — {result.decision.reasons}")
 ```
 
-## Architecture (v0.4)
+---
+
+## Architecture
+
+### Six core primitives
+
+| Primitive | Role | Trust level |
+|-----------|------|-------------|
+| `Principal` | Who is calling | Trusted (from host IAM) |
+| `Intent` | What the AI wants | **Untrusted** |
+| `Policy` | What is allowed | Deterministic |
+| `Execution IR` | Typed, validated plan | DataFence-owned |
+| `AuthorizedExecution` | Signed capability | Cryptographic |
+| `Evidence` | Audit record | Tamper-evident |
+
+### Security flow
 
 ```
-┌─────────────────────────────────────────────────┐
-│              AI Agent / LLM                     │
-│  "Show me recent transactions"                  │
-└─────────────────┬───────────────────────────────┘
-                  │ Intent
-                  ▼
-┌─────────────────────────────────────────────────┐
-│         DataFenceBoundary (v0.4)                │
-│                                                 │
-│  1. Policy Evaluation                           │
-│     ├─ Field authorization                      │
-│     ├─ Operation authorization                  │
-│     └─ Tenant isolation                         │
-│                                                 │
-│  2. Create AuthorizedExecution                  │
-│     ├─ HMAC-SHA256 signature                    │
-│     ├─ Cryptographic capability                 │
-│     └─ Cannot be forged                         │
-│                                                 │
-│  3. Execute (Private Connector)                 │
-│     ├─ Verify signature                         │
-│     ├─ Generate SQL from capability             │
-│     └─ Prepared statements                      │
-│                                                 │
-│  4. Validate Result                             │
-│     └─ Check returned fields                    │
-└─────────────────┬───────────────────────────────┘
-                  │ Verified Data
-                  ▼
-┌─────────────────────────────────────────────────┐
-│              Application                        │
-└─────────────────────────────────────────────────┘
+Intent (untrusted)
+  ↓
+Resource Registry       → validates identifiers exist in schema
+  ↓
+Policy Engine           → ALLOW / DENY with enforced filters
+  ↓
+AuthorizedExecution     → HMAC-SHA256 signed capability
+  ↓
+Connector               → verifies signature, compiles safe SQL
+  ↓
+Result Validator        → no unauthorized fields leak out
+  ↓
+AllowedRequest + Evidence
 ```
 
-## Security Model (v0.4)
+### Key invariants
 
-### What v0.4 Protects Against
+- The database never executes LLM-generated SQL
+- Policy **injects** row filters (tenant isolation); the LLM cannot bypass them
+- User predicates can **narrow** an authorized scope, never widen it
+- Identifier injection is prevented by `validate_identifier()` on all SQL identifiers
+- Signed capabilities cannot be forged or tampered without the HMAC key
+- Fail-closed on all errors
 
-✅ **Capability Forgery** - HMAC signature prevents forged authorization  
-✅ **Connector Bypass** - No `execute_plan()`, connector verifies signatures  
-✅ **Tenant Isolation** - Policy enforces tenant boundaries  
-✅ **Field Leakage** - Denied fields cannot reach connector  
-✅ **Capability Tampering** - Mutation breaks HMAC signature  
-✅ **SQL Injection** - Prepared statements + structured queries  
+### Trust model
 
-### What v0.4 Does NOT Protect
+**Host application is responsible for:**
+- Authenticating the principal before calling DataFence
+- Providing a verified `Actor` / `Principal` object
+- Managing sessions, tokens, and identity
 
-❌ **Full Python Runtime Compromise** - Explicitly out of scope  
-❌ **Database-Level Authorization** - Assumes trusted DB connection  
-❌ **Actor Authentication** - Application's responsibility  
+**DataFence is responsible for:**
+- Authorizing what the authenticated principal may do
+- Enforcing row-level and column-level policy
+- Generating cryptographically signed execution capabilities
+- Validating results
+- Producing tamper-evident evidence
 
-### Trust Boundaries
+DataFence is **not** an IAM system. It authorizes the principal you provide.
 
-**Application's Responsibility:**
-- Authenticate actors before calling DataFence
-- Provide verified Actor objects
-- Manage sessions and identity
+---
 
-**DataFence's Responsibility:**
-- Enforce policy for provided Actor
-- Ensure authorized operations only
-- Generate cryptographic proof (evidence)
-- Validate results
+## What's implemented
 
-## Security Improvements (v0.3 → v0.4)
-
-| Vulnerability | v0.3 Status | v0.4 Status |
-|---------------|-------------|-------------|
-| ExecutionPlan forgery | ❌ Anyone can construct | ✅ HMAC signature required |
-| Connector bypass | ❌ Public `execute_plan()` | ✅ Removed, signature verified |
-| Capability tampering | ❌ `frozen=True` bypassable | ✅ Breaks HMAC signature |
-| Tenant isolation | ⚠️ Policy only | ✅ Policy + signed capability |
-
-## What's Implemented (v0.4)
-
-### Core Security
+### Core (v0.5, stable)
 ✅ Cryptographic capability model (HMAC-SHA256)  
-✅ Signed AuthorizedExecution (prevents forgery)  
-✅ Signature verification before execution  
-✅ Policy-based authorization  
-✅ Column-level security (field restrictions)  
-✅ Row-level security (tenant isolation)  
-✅ Operation controls (READ operations)  
-✅ Result validation (field enforcement)  
-✅ Evidence generation  
-✅ Audit trail  
+✅ Typed execution IR (ResourceRef, FieldRef, Predicate, Filter, Projection)  
+✅ Identifier validation — no f-string interpolation of SQL identifiers  
+✅ Enhanced policy model with YAML loader  
+✅ Policy **injects** row filters (not requires them from LLM)  
+✅ Resource Registry with data classification  
+✅ Column-level security (field allow/deny)  
+✅ Row-level security (tenant isolation, injected predicates)  
+✅ Result validation (defense-in-depth)  
+✅ Tamper-evident evidence / audit trail  
+✅ Security regression test suite (all v0.3 attacks blocked)  
 
 ### Connectors
-✅ SQLite connector (v0.4 with signature verification)  
+✅ SQLite — reference implementation, v0.5 capability interface  
+⚠️ PostgreSQL — v0.5 interface, **not integration-tested** (no real DB in CI)  
+⚠️ Athena — v0.5 interface, **not integration-tested**  
+⚠️ Snowflake — v0.5 interface, **not integration-tested**  
 
-### Testing & Security
-✅ Adversarial test suite (12 security tests)  
-✅ Attack verification (5 critical v0.3 attacks blocked)  
-✅ Killer demo (6 security scenarios)  
+The legacy v0.1–v0.3 connectors (connectors/postgres.py, connectors/athena.py,
+connectors/snowflake.py) are **deprecated** and lack capability signatures.
 
-## What's NOT Implemented (Yet)
+### Integrations (experimental)
+⚠️ MCP server + tool — functional, not hardened  
+⚠️ OpenAI function-calling adapter — functional  
+⚠️ Anthropic tool-use adapter — functional  
+⚠️ LangChain tool adapter — functional  
 
-### Database Connectors
-❌ PostgreSQL connector (exists in legacy v0.1-v0.3, not migrated to v0.4)  
-❌ Athena connector (legacy only)  
-❌ Snowflake connector (legacy only)  
-
-**Note:** Legacy connectors lack v0.4 cryptographic signatures and are marked deprecated.
-
-### Features
-❌ Write operations (INSERT, UPDATE, DELETE) - v0.4 is read-only  
-❌ Resource abstraction layer (typed resources, schema validation)  
-❌ Advanced policy engine (complex conditions, obligations, approval flows)  
-
-### Integrations
-❌ MCP integration  
-❌ LangChain integration  
-❌ OpenAI/Anthropic adapters  
-❌ REST API  
-
-### Operations
+### Not implemented
+❌ Write operations (INSERT, UPDATE, DELETE)  
+❌ Complex predicates (OR, IN, NOT) from user intent  
 ❌ Policy management UI  
-❌ Monitoring & metrics  
-❌ Deployment tools  
-❌ Key management system  
+❌ Key management / rotation  
+❌ Deployment tooling  
+
+---
+
+## Security improvements (v0.3 → v0.4 → v0.5)
+
+| Vulnerability | v0.3 | v0.4 | v0.5 |
+|---------------|------|------|------|
+| ExecutionPlan forgery | ❌ | ✅ HMAC | ✅ |
+| Connector bypass | ❌ execute_plan() | ✅ removed | ✅ |
+| Identifier injection | ❌ f-strings | ❌ f-strings | ✅ validated |
+| Capability tampering | ❌ frozen bypassable | ✅ breaks HMAC | ✅ |
+| Tenant isolation | ⚠️ policy only | ✅ + signed | ✅ + registry |
+| Field leakage | ⚠️ | ✅ | ✅ + classification |
+
+---
 
 ## Testing
 
 ```bash
-# Run v0.4 security tests
+# Install
+pip install -e .
+
+# Core security regression tests
 pytest tests/test_v04_security.py -v
 
-# Verify attacks are blocked
+# Full Phase 1-7 tests
+pytest tests/test_phases_1_7.py -v
+
+# Verify all v0.3 attacks are blocked
 python attacks/verify_v04_blocks_attacks.py
 
-# Run killer demo
+# Run the killer demo
 python demos/killer_demo.py
 ```
 
+---
+
 ## Roadmap
 
-- **v0.4** ✅ Core security boundary with cryptographic capabilities
-- **v0.5** → Enhanced policy model (richer conditions, constraints)
-- **v0.6** → Resource abstraction (typed resources, validated identifiers)
-- **v0.7** → PostgreSQL connector
-- **v0.8** → Data warehouse connectors (Athena, Snowflake)
-- **v0.9** → Agent integrations (OpenAI, Claude, LangChain, MCP)
-- **v1.0** → External security review + production hardening
+| Version | Focus |
+|---------|-------|
+| **v0.5.0** ✅ | Typed IR, new policy engine, registry, new connectors |
+| v0.5.1 | Architecture freeze, PostgreSQL integration tests |
+| v0.6.0 | Resource Registry in all connectors, policy semantics formalization |
+| v0.7.0 | PostgreSQL production hardening + CI integration tests |
+| v0.8.0 | Athena / Snowflake production hardening |
+| v0.9.0 | MCP + integrations hardening, benchmarks |
+| v1.0.0 | External security review, production hardening |
 
-## Known Limitations
+---
 
-1. **Actor Authentication** - Application must authenticate actors
-2. **Single Database Connection** - Connector doesn't use actor identity for DB auth
-3. **Read-Only** - Only SELECT queries implemented
-4. **SQLite Only** - No production database connectors yet
-5. **Simple Policy Engine** - Basic field/operation/tenant controls only
+## Known limitations
+
+1. **Actor authentication** — application must authenticate before calling DataFence
+2. **SQLite only tested end-to-end** — Postgres/Athena/Snowflake not integration-tested yet
+3. **Read-only** — only SELECT implemented
+4. **Simple predicate merging** — complex user predicates (OR, IN, NOT) not supported
+5. **No key management** — signing key is in-memory, not persisted or rotated
+6. **Prototype security** — do NOT use in production without external review
+
+---
 
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/datafence.git
+git clone https://github.com/Himanshusinghxgit/datafence.git
 cd datafence
 pip install -e .
+
+# Optional: PostgreSQL support
+pip install -e ".[postgres]"
+
+# Optional: Athena support  
+pip install -e ".[athena]"
 ```
 
-## Documentation
-
-- `demos/README.md` - 30-second killer demo
-- `CAPABILITY_ARCHITECTURE_EVALUATION.md` - Security design decisions
-- `tests/test_v04_security.py` - Security test suite
-- `attacks/` - Adversarial testing results
+---
 
 ## License
 
 Apache 2.0
 
-## Security
-
-This is prototype software. Do NOT use in production without:
-- External security review
-- Penetration testing
-- Proper key management
-- Database-level authorization
-- Actor authentication integration
-
-For security issues: [Report privately]
-
 ---
 
-**Version:** 0.4.0  
-**Status:** Prototype (Security Hardened)  
-**Next Milestone:** v0.5 (Enhanced Policy Model)
+**Version:** 0.5.0  
+**Status:** Prototype (Architecture stabilizing)  
+**Next:** v0.5.1 — Architecture freeze + PostgreSQL integration tests

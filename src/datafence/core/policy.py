@@ -303,8 +303,9 @@ class DataFencePolicyEngine(PolicyEngine):
                                    requested_fields=["id", "merchant", "amount"])
     """
 
-    def __init__(self, policy: DataFencePolicy) -> None:
+    def __init__(self, policy: DataFencePolicy, registry: Any = None) -> None:
         self._policy = policy
+        self._registry = registry  # Optional ResourceRegistry
 
     @property
     def policy_name(self) -> str:
@@ -358,6 +359,9 @@ class DataFencePolicyEngine(PolicyEngine):
         Accepts either an Operation enum (from boundary) or a plain string.
         Also accepts ``actor`` keyword for backward compatibility with the
         old SimplePolicyEngine interface.
+
+        If a ResourceRegistry was provided at construction, validates fields
+        against the registry schema before checking policy rules.
         """
         # Backward-compat: accept 'actor' kwarg
         if principal is None and actor is not None:
@@ -377,6 +381,24 @@ class DataFencePolicyEngine(PolicyEngine):
                 policy_name=self._policy.name,
                 policy_version=self._policy.version,
             )
+
+        # 0. Registry validation (if registry provided)
+        if self._registry is not None:
+            if not self._registry.exists(resource):
+                return PolicyDecision.deny(
+                    reasons=[f"Resource {resource!r} is not registered"],
+                    policy_name=self._policy.name,
+                    policy_version=self._policy.version,
+                )
+            if requested_fields:
+                try:
+                    self._registry.validate_fields(resource, requested_fields)
+                except ValueError as exc:
+                    return PolicyDecision.deny(
+                        reasons=[str(exc)],
+                        policy_name=self._policy.name,
+                        policy_version=self._policy.version,
+                    )
 
         # 1. Action check
         action_decision = rp.action_decision(action)
@@ -587,11 +609,15 @@ def _bridge_to_new_decision(old_decision: Any, policy_name: str,
     )
 
 
-def create_banking_policy() -> DataFencePolicyEngine:
+def create_banking_policy(with_registry: bool = True) -> "DataFencePolicyEngine":
     """
-    Create the banking demo policy using the new Phase-3 model.
+    Create the banking demo policy using the Phase-3 model.
 
     This is the v2 replacement for create_banking_demo_policy() in policy_engine.py.
+
+    Args:
+        with_registry: If True (default), attach the banking ResourceRegistry
+                       so field validation runs against the actual schema.
     """
     from datafence.core.policy import (
         ActionDecision, DataFencePolicy, DataFencePolicyEngine,
@@ -656,4 +682,8 @@ def create_banking_policy() -> DataFencePolicyEngine:
             ),
         },
     )
-    return DataFencePolicyEngine(policy)
+    registry = None
+    if with_registry:
+        from datafence.core.registry import create_banking_registry
+        registry = create_banking_registry()
+    return DataFencePolicyEngine(policy, registry=registry)
