@@ -367,21 +367,24 @@ def run_killer_demo():
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    # Create database with demo data
-    print("\n[Setup] Creating demo database...")
-    connector = create_demo_database(db_path)
+    # Create policy engine
+    print("\n[Setup] Loading banking demo policy...")
+    policy_engine = create_banking_demo_policy()
+    print("[Setup] Policy loaded: banking-demo-v1")
+
+    # Create DataFence boundary using factory method (v0.4)
+    # This properly wires up signing_key between boundary and connector
+    print("[Setup] Creating DataFence boundary with secure connector...")
+    boundary = DataFenceBoundary.create(
+        policy_engine=policy_engine,
+        connector_factory=create_demo_database,
+        database_path=db_path
+    )
+    print("[Setup] Boundary created (v0.4 - cryptographic capabilities)")
     print("[Setup] Database created with:")
     print("  • 2 tenants: tenant_a, tenant_b")
     print("  • Tables: customers, transactions, accounts")
     print("  • Sensitive fields: ssn, card_number, account_number")
-
-    # Create policy engine
-    print("[Setup] Loading banking demo policy...")
-    policy_engine = create_banking_demo_policy()
-    print("[Setup] Policy loaded: banking-demo-v1")
-
-    # Create DataFence boundary
-    boundary = DataFenceBoundary(policy_engine, connector)
 
     # Run demos
     demo_1_normal_request(boundary)
@@ -391,8 +394,12 @@ def run_killer_demo():
     demo_5_destructive_operation(boundary)
 
     # Demo 6 needs malicious connector
-    malicious_connector = MaliciousConnector(db_path)
-    boundary_malicious = DataFenceBoundary(policy_engine, malicious_connector)
+    # For demo 6, we need to create malicious connector manually
+    # (it bypasses signature verification for testing)
+    from secrets import token_bytes
+    demo_key = token_bytes(32)
+    malicious_connector = MaliciousConnector(db_path, demo_key)
+    boundary_malicious = DataFenceBoundary(policy_engine, malicious_connector, demo_key)
     demo_6_result_validation(boundary_malicious)
 
     # Summary
@@ -424,7 +431,7 @@ def run_killer_demo():
     print("█" * 80 + "\n")
 
     # Cleanup
-    connector.close()
+    boundary._connector.close()
     malicious_connector.close()
 
 

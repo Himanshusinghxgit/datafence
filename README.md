@@ -144,28 +144,53 @@ else:
 | Capability tampering | ❌ `frozen=True` bypassable | ✅ Breaks HMAC signature |
 | Tenant isolation | ⚠️ Policy only | ✅ Policy + signed capability |
 
-## What's Implemented
+## What's Implemented (v0.4)
 
+### Core Security
 ✅ Cryptographic capability model (HMAC-SHA256)  
+✅ Signed AuthorizedExecution (prevents forgery)  
+✅ Signature verification before execution  
 ✅ Policy-based authorization  
 ✅ Column-level security (field restrictions)  
 ✅ Row-level security (tenant isolation)  
-✅ Operation controls (READ only in demo)  
-✅ Result validation  
+✅ Operation controls (READ operations)  
+✅ Result validation (field enforcement)  
 ✅ Evidence generation  
 ✅ Audit trail  
-✅ SQLite connector  
-✅ Adversarial test suite  
 
-## What's NOT Implemented
+### Connectors
+✅ SQLite connector (v0.4 with signature verification)  
 
-❌ PostgreSQL connector  
-❌ Data warehouse connectors (Athena, Snowflake)  
-❌ Write operations (INSERT, UPDATE, DELETE)  
-❌ MCP / LangChain integrations  
+### Testing & Security
+✅ Adversarial test suite (12 security tests)  
+✅ Attack verification (5 critical v0.3 attacks blocked)  
+✅ Killer demo (6 security scenarios)  
+
+## What's NOT Implemented (Yet)
+
+### Database Connectors
+❌ PostgreSQL connector (exists in legacy v0.1-v0.3, not migrated to v0.4)  
+❌ Athena connector (legacy only)  
+❌ Snowflake connector (legacy only)  
+
+**Note:** Legacy connectors lack v0.4 cryptographic signatures and are marked deprecated.
+
+### Features
+❌ Write operations (INSERT, UPDATE, DELETE) - v0.4 is read-only  
+❌ Resource abstraction layer (typed resources, schema validation)  
+❌ Advanced policy engine (complex conditions, obligations, approval flows)  
+
+### Integrations
+❌ MCP integration  
+❌ LangChain integration  
+❌ OpenAI/Anthropic adapters  
 ❌ REST API  
+
+### Operations
 ❌ Policy management UI  
+❌ Monitoring & metrics  
 ❌ Deployment tools  
+❌ Key management system  
 
 ## Testing
 

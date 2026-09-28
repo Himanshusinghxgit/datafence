@@ -2,13 +2,56 @@
 DataFence - A deterministic security boundary between AI agents and enterprise data.
 
 The core principle: The model proposes. DataFence decides.
+
+Version 0.4.0 - Cryptographic Capability Model
+-----------------------------------------------
+
+v0.4 introduces cryptographically signed capabilities with HMAC-SHA256,
+eliminating forgery attacks discovered in v0.3 security review.
+
+RECOMMENDED API (v0.4):
+    from datafence.core.boundary import DataFenceBoundary
+    
+    boundary = DataFenceBoundary.create(
+        policy_engine=policy_engine,
+        connector_factory=create_demo_database,
+        database_path=db_path
+    )
+    
+    result = boundary.execute(actor, intent)
+
+LEGACY API (v0.1-v0.3, DEPRECATED):
+    from datafence import DataFence  # OLD - Insecure
+    
+    The legacy DataFence engine lacks cryptographic signatures and is
+    vulnerable to capability forgery attacks. Use DataFenceBoundary instead.
 """
 
-from datafence.core.context import Actor, ActorType, RequestContext
-from datafence.core.decision import Decision, DecisionStatus
-from datafence.core.engine import DataFence
-from datafence.core.request import ExecutionRequest, Operation
-from datafence.core.result import ExecutionResult
+# v0.4 API (RECOMMENDED)
+from datafence.core.boundary import DataFenceBoundary
+from datafence.core.types import (
+    Actor,
+    AllowedRequest,
+    Decision,
+    DeniedRequest,
+    Evidence,
+    ExecutionPlan,
+    ExecutionResult,
+    Intent,
+    Operation,
+    Request,
+)
+
+# Legacy v0.1-v0.3 API (DEPRECATED)
+from datafence.core.context import ActorType, RequestContext
+from datafence.core.context import Actor as LegacyActor
+from datafence.core.decision import DecisionStatus
+from datafence.core.decision import Decision as LegacyDecision
+from datafence.core.engine import DataFence  # DEPRECATED
+from datafence.core.request import ExecutionRequest
+from datafence.core.result import ExecutionResult as LegacyExecutionResult
+
+# Errors
 from datafence.errors import (
     ConfigurationError,
     ConnectorError,
@@ -19,22 +62,33 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 __all__ = [
-    # Core
-    "DataFence",
-    # Request/Response
-    "ExecutionRequest",
-    "ExecutionResult",
-    "RequestContext",
+    # ===== v0.4 API (RECOMMENDED) =====
+    "DataFenceBoundary",
     "Actor",
-    "ActorType",
-    "Operation",
-    # Decision
+    "Intent",
+    "Request",
+    "ExecutionPlan",
+    "AllowedRequest",
+    "DeniedRequest",
+    "ExecutionResult",
+    "Evidence",
     "Decision",
+    "Operation",
+    
+    # ===== Legacy API (DEPRECATED) =====
+    "DataFence",  # DEPRECATED: Use DataFenceBoundary
+    "ExecutionRequest",
+    "LegacyExecutionResult",
+    "RequestContext",
+    "LegacyActor",
+    "ActorType",
+    "LegacyDecision",
     "DecisionStatus",
-    # Errors
+    
+    # ===== Errors =====
     "DataFenceError",
     "PolicyError",
     "PolicyDeniedError",

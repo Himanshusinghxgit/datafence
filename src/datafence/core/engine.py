@@ -1,10 +1,25 @@
 """
-DataFence execution engine.
+DataFence execution engine (DEPRECATED - v0.1-v0.3).
 
-The central enforcement boundary between AI and data.
+⚠️  DEPRECATED: This is the legacy DataFence engine from v0.1-v0.3.
+    Use DataFenceBoundary from datafence.core.boundary instead.
+
+SECURITY WARNING: This engine does not have the v0.4 cryptographic
+capability model and may be vulnerable to attacks discovered in v0.3.
+
+The v0.4 architecture provides stronger security guarantees:
+- Cryptographically signed capabilities (HMAC-SHA256)
+- Private connector (no direct access)
+- Defense in depth
+
+See: src/datafence/core/boundary.py for the v0.4 implementation.
+
+This module is kept for backward compatibility only and will be
+removed in a future version.
 """
 
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +41,20 @@ from datafence.security.sql_firewall import SQLFirewall, QueryRisk
 
 class DataFence:
     """
-    DataFence execution engine.
+    DataFence execution engine (DEPRECATED - v0.1-v0.3).
 
-    The deterministic security boundary between AI agents and enterprise data.
+    ⚠️  DEPRECATED: This is the legacy DataFence engine.
+        Use DataFenceBoundary from datafence.core.boundary instead.
+
+    SECURITY WARNING: This engine lacks v0.4 cryptographic capabilities
+    and is vulnerable to attacks discovered during v0.3 security review.
+
+    The v0.4 DataFenceBoundary provides:
+    - Cryptographically signed capabilities (HMAC-SHA256)
+    - Private connector (prevents bypass attacks)
+    - Stronger defense in depth
+
+    This class is kept for backward compatibility only.
 
     Architecture:
         Request → Normalize → Authenticate → Policy → Execute → Validate → Result
@@ -45,7 +71,9 @@ class DataFence:
         pii_redaction_strategy: RedactionStrategy = RedactionStrategy.MASK,
     ):
         """
-        Initialize DataFence engine.
+        Initialize DataFence engine (DEPRECATED).
+
+        ⚠️  DEPRECATED: Use DataFenceBoundary.create() instead.
 
         Args:
             policy: Security policy to enforce
@@ -56,6 +84,14 @@ class DataFence:
             enable_pii_detection: Enable PII detection and redaction in results
             pii_redaction_strategy: Strategy for PII redaction
         """
+        warnings.warn(
+            "DataFence engine (v0.1-v0.3) is deprecated. "
+            "Use DataFenceBoundary from datafence.core.boundary for v0.4 security model. "
+            "The legacy engine lacks cryptographic capability signatures and is vulnerable "
+            "to attacks discovered in v0.3 security review.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         self.policy = policy
         self.connector = connector
         self.audit_logger = audit_logger or ConsoleAuditLogger()

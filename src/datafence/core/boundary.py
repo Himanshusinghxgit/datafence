@@ -199,6 +199,7 @@ class DataFenceBoundary:
         self,
         policy_engine: PolicyEngine,
         connector: Connector,
+        signing_key: bytes = None,
     ):
         """
         Initialize DataFence boundary.
@@ -206,22 +207,34 @@ class DataFenceBoundary:
         Args:
             policy_engine: Policy evaluation engine
             connector: Data connector (must support signature verification)
+            signing_key: Optional signing key (32 bytes). If not provided, generates new key.
+        
+        DEPRECATED: Direct construction is deprecated in v0.4.
+        Use DataFenceBoundary.create() factory method instead.
         
         SECURITY:
-        - Generates 32-byte signing key for HMAC
-        - Key is kept private within boundary
-        - Connector must have been constructed with same key
-        
-        IMPORTANT: Use create() factory method instead of direct construction.
-        This ensures connector and boundary share the signing key properly.
+        - In v0.4, the boundary and connector MUST share the same signing key
+        - Use create() factory to ensure proper key sharing
+        - Direct construction may lead to key mismatch errors
         """
         self.policy_engine = policy_engine
         self._connector = connector  # PRIVATE - not accessible externally
         self.validator = ResultValidator()
         
-        # NOTE: Signing key should have been set by create() factory
-        # This is here for backward compatibility but will be refactored
-        if not hasattr(self, '_signing_key'):
+        # Set or generate signing key
+        if signing_key is not None:
+            self._signing_key = signing_key
+        elif not hasattr(self, '_signing_key'):
+            # Fallback: generate key (for backward compatibility)
+            # WARNING: This will cause key mismatch with connector!
+            import warnings
+            warnings.warn(
+                "Direct construction of DataFenceBoundary is deprecated. "
+                "Use DataFenceBoundary.create() factory method to ensure "
+                "proper key sharing with connector.",
+                DeprecationWarning,
+                stacklevel=2
+            )
             self._signing_key = token_bytes(32)
     
     @classmethod
@@ -234,38 +247,44 @@ class DataFenceBoundary:
         """
         Create DataFenceBoundary with properly configured connector.
         
-        This is the RECOMMENDED way to create a boundary.
+        This is THE REQUIRED way to create a boundary in v0.4.
         
         Args:
             policy_engine: Policy evaluation engine
-            connector_factory: Connector class (e.g., SQLiteConnector)
+            connector_factory: Connector factory function or class
             **connector_kwargs: Arguments for connector (e.g., database_path)
         
         Returns:
             Configured DataFenceBoundary
         
         Example:
+            from datafence.connectors.sqlite_connector import create_demo_database
+            
             boundary = DataFenceBoundary.create(
                 policy_engine=policy_engine,
-                connector_factory=SQLiteConnector,
+                connector_factory=create_demo_database,
                 database_path="/path/to/db.sqlite"
             )
         
         SECURITY:
         - Generates signing key once
-        - Passes key to connector at construction
+        - Passes key to connector factory at construction
         - Connector and boundary share same key
         - Key never exposed through public API
         """
-        # Generate signing key
+        # Generate signing key (32 bytes for HMAC-SHA256)
         signing_key = token_bytes(32)
         
         # Create connector with signing key
-        connector = connector_factory(signing_key=signing_key, **connector_kwargs)
+        # Pass signing_key as kwarg - factory MUST accept it
+        connector = connector_factory(**connector_kwargs, signing_key=signing_key)
         
-        # Create boundary
-        boundary = cls(policy_engine, connector)
+        # Create boundary instance
+        boundary = cls.__new__(cls)
+        boundary.policy_engine = policy_engine
+        boundary._connector = connector
         boundary._signing_key = signing_key
+        boundary.validator = ResultValidator()
         
         return boundary
 

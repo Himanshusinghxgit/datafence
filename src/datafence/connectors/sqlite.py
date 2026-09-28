@@ -1,8 +1,23 @@
 """
-SQLite connector for local development and testing.
+SQLite connector for local development and testing (DEPRECATED - v0.1-v0.3).
+
+⚠️  DEPRECATED: This is the legacy SQLite connector from v0.1-v0.3.
+    Use SQLiteConnector from datafence.connectors.sqlite_connector instead.
+
+SECURITY WARNING: This connector uses the old ExecutionRequest interface
+and lacks v0.4 cryptographic capability verification. It is vulnerable
+to attacks discovered in v0.3 security review.
+
+The v0.4 SQLiteConnector provides:
+- HMAC-SHA256 signature verification
+- AuthorizedExecution (not forgeable ExecutionRequest)
+- Defense against capability forgery attacks
+
+This module is kept for backward compatibility only.
 """
 
 import sqlite3
+import warnings
 from typing import Any
 
 from datafence.connectors.base import DataConnector
@@ -12,18 +27,32 @@ from datafence.errors import ConnectorError, ValidationError
 
 class SQLiteConnector(DataConnector):
     """
-    SQLite connector.
+    SQLite connector (DEPRECATED - v0.1-v0.3).
+
+    ⚠️  DEPRECATED: Use SQLiteConnector from datafence.connectors.sqlite_connector instead.
+
+    SECURITY WARNING: This connector lacks v0.4 cryptographic capability
+    verification and is vulnerable to forgery attacks.
 
     Supports safe SQL execution with field filtering.
     """
 
     def __init__(self, database: str):
         """
-        Initialize SQLite connector.
+        Initialize SQLite connector (DEPRECATED).
+
+        ⚠️  DEPRECATED: Use the v0.4 SQLiteConnector instead.
 
         Args:
             database: Path to SQLite database file (or ':memory:' for in-memory)
         """
+        warnings.warn(
+            "SQLite connector (v0.1-v0.3) is deprecated. "
+            "Use SQLiteConnector from datafence.connectors.sqlite_connector for v0.4 security model. "
+            "The legacy connector lacks cryptographic capability verification.",
+            DeprecationWarning,
+            stacklevel=2
+        )
         self.database = database
         self._conn: sqlite3.Connection | None = None
 
