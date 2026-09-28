@@ -3,51 +3,49 @@ DataFence — Policy-Enforced Data Execution for AI.
 
 The core principle: The model proposes. DataFence decides.
 
-Version 0.5.0 — Unified architecture
---------------------------------------
+Version 0.5.0 — Unified v0.5 architecture
+------------------------------------------
+All legacy v0.1–v0.4 code has been moved to datafence._legacy/.
+The public API exposes only the v0.5 capability-based architecture.
 
-What's new in v0.5:
-  - Typed Resource/Execution IR (ResourceRef, FieldRef, Predicate, Filter)
-  - Identifier validation — no f-string interpolation of SQL identifiers
-  - Enhanced policy model (DataFencePolicyEngine, YAML loader, Obligations)
-  - Policy INJECTS row filters; the LLM cannot bypass or override them
-  - PostgreSQL, Athena, Snowflake connectors on the new capability interface
-  - MCP server + tool (Phase 6)
-  - OpenAI, Anthropic, LangChain thin adapters (Phase 7)
-  - ExecutionPlan clearly marked as audit/evidence only (not executable)
+Single execution path:
+    Intent (untrusted)
+        ↓  Resource Registry validates identifiers
+        ↓  Policy Engine evaluates + injects row filters
+        ↓  AuthorizedExecution (HMAC-signed capability)
+        ↓  Connector (verifies signature, compiles safe SQL)
+        ↓  Result Validator
+        → AllowedRequest + Evidence
 
-Recommended usage::
+There is no alternate path. No ExecutionRequest. No raw SQL from agents.
+
+Quick start::
 
     from datafence import DataFenceBoundary, Actor, Intent, Operation
-    from datafence.core.policy import create_banking_policy
+    from datafence import create_banking_policy
     from datafence.connectors.sqlite_connector import create_demo_database
 
     boundary = DataFenceBoundary.create(
         policy_engine=create_banking_policy(),
         connector_factory=create_demo_database,
-        database_path="/path/to/db.sqlite",
+        database_path="data.db",
     )
 
-    principal = Actor(id="agent:finance", tenant_id="acme-corp")
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=["id", "merchant", "amount"],
+    result = boundary.execute(
+        Actor(id="agent:finance", tenant_id="acme"),
+        Intent(resource="transactions", operation=Operation.READ,
+               fields=["id", "merchant", "amount"]),
     )
-
-    result = boundary.execute(principal, intent)
-
-LEGACY API (v0.1–v0.4, deprecated)::
-
-    from datafence import DataFence  # old engine, insecure
 """
 
 # ---------------------------------------------------------------------------
-# v0.5 core API
+# Core boundary
 # ---------------------------------------------------------------------------
-
 from datafence.core.boundary import DataFenceBoundary
 
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
 from datafence.core.types import (
     Actor,
     AllowedRequest,
@@ -63,7 +61,9 @@ from datafence.core.types import (
     Request,
 )
 
-# Typed IR
+# ---------------------------------------------------------------------------
+# Typed execution IR
+# ---------------------------------------------------------------------------
 from datafence.core.resources import (
     FieldRef,
     Filter,
@@ -74,7 +74,9 @@ from datafence.core.resources import (
     RowLimit,
 )
 
-# Enhanced policy model
+# ---------------------------------------------------------------------------
+# Policy engine (v0.5)
+# ---------------------------------------------------------------------------
 from datafence.core.policy import (
     ActionDecision,
     DataFencePolicy,
@@ -86,7 +88,9 @@ from datafence.core.policy import (
     create_banking_policy,
 )
 
+# ---------------------------------------------------------------------------
 # Resource Registry
+# ---------------------------------------------------------------------------
 from datafence.core.registry import (
     DataClassification,
     FieldDefinition,
@@ -95,28 +99,16 @@ from datafence.core.registry import (
     create_banking_registry,
 )
 
-# Capability — INTERNAL, not for application code
-# AuthorizedExecution is created only by DataFenceBoundary.
-# Applications should never construct or inspect capabilities directly.
-# Exported here for testing and advanced integration use ONLY.
+# ---------------------------------------------------------------------------
+# Capability error (for exception handling)
+# Note: AuthorizedExecution itself is NOT exported — it is internal to
+# DataFenceBoundary. Application code should never construct capabilities.
+# ---------------------------------------------------------------------------
 from datafence.core.capability import CapabilityVerificationError
-
-# ---------------------------------------------------------------------------
-# Legacy v0.1–v0.4 API (deprecated — kept for backward compatibility)
-# ---------------------------------------------------------------------------
-
-from datafence.core.context import ActorType, RequestContext
-from datafence.core.context import Actor as LegacyActor
-from datafence.core.decision import DecisionStatus
-from datafence.core.decision import Decision as LegacyDecision
-from datafence.core.engine import DataFence          # DEPRECATED
-from datafence.core.request import ExecutionRequest
-from datafence.core.result import ExecutionResult as LegacyExecutionResult
 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
-
 from datafence.errors import (
     ConfigurationError,
     ConnectorError,
@@ -130,24 +122,24 @@ from datafence.errors import (
 __version__ = "0.5.0"
 
 __all__ = [
-    # ===== Core v0.5 API =====
+    # ── Core ─────────────────────────────────────────────────────────────
     "DataFenceBoundary",
 
-    # Types
+    # ── Types ─────────────────────────────────────────────────────────────
     "Actor",
     "Intent",
     "Request",
     "Operation",
     "Decision",
     "PolicyDecision",
-    "ExecutionPlan",
+    "ExecutionPlan",       # audit / evidence only — not executable
     "ExecutionResult",
     "AllowedRequest",
     "DeniedRequest",
     "Evidence",
     "AuditEvent",
 
-    # Typed IR
+    # ── Typed IR ──────────────────────────────────────────────────────────
     "ResourceRef",
     "FieldRef",
     "Predicate",
@@ -156,7 +148,7 @@ __all__ = [
     "Projection",
     "RowLimit",
 
-    # Policy
+    # ── Policy ────────────────────────────────────────────────────────────
     "DataFencePolicyEngine",
     "DataFencePolicy",
     "ResourcePolicy",
@@ -166,27 +158,15 @@ __all__ = [
     "YAMLPolicyLoader",
     "create_banking_policy",
 
-    # Resource Registry
+    # ── Registry ──────────────────────────────────────────────────────────
     "ResourceRegistry",
     "ResourceDefinition",
     "FieldDefinition",
     "DataClassification",
     "create_banking_registry",
 
-    # Capability (error only — AuthorizedExecution is internal)
+    # ── Errors ────────────────────────────────────────────────────────────
     "CapabilityVerificationError",
-
-    # ===== Legacy API (deprecated) =====
-    "DataFence",
-    "ExecutionRequest",
-    "LegacyExecutionResult",
-    "RequestContext",
-    "LegacyActor",
-    "ActorType",
-    "LegacyDecision",
-    "DecisionStatus",
-
-    # ===== Errors =====
     "DataFenceError",
     "PolicyError",
     "PolicyDeniedError",
