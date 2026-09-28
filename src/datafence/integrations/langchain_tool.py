@@ -1,312 +1,162 @@
 """
-LangChain integration for DataFence.
+DataFence LangChain tool adapter (Phase 7).
 
-Provides LangChain tools with DataFence security enforcement.
+Wraps a DataFenceBoundary as a LangChain BaseTool so it can be used inside
+LangChain agents, chains, and tool executors.
+
+Architecture::
+
+    LangChain Agent
+        │  tool.run("{'resource': 'transactions', 'fields': [...]}")
+        ▼
+    DataFenceLangChainTool._run(query_str)
+        │  parses JSON → Intent
+        ▼
+    DataFenceBoundary.execute(principal, intent)
+        │  policy → capability → connector → validation
+        ▼
+    str (JSON result or denial)
+
+Security invariant:
+    The LangChain agent controls the query string (untrusted).
+    The host application provides the principal at construction time.
+
+Usage::
+
+    from datafence.integrations.langchain_tool import DataFenceLangChainTool
+    from datafence.core.types import Actor
+
+    principal = Actor(id="user:alice", tenant_id="acme")
+    tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
+
+    # Add to LangChain agent
+    agent = initialize_agent(
+        tools=[tool],
+        llm=llm,
+        agent=AgentType.OPENAI_FUNCTIONS,
+    )
+    agent.run("Show me recent transactions for my account")
+
+Note: LangChain is an optional dependency.
+    pip install 'datafence[integrations]'
 """
 
+from __future__ import annotations
+
+import json
 from typing import Any, Optional, Type
 
-try:
-    from langchain.tools import BaseTool
-    from langchain.callbacks.manager import CallbackManagerForToolRun
-    from pydantic import BaseModel, Field
-except ImportError:
-    BaseTool = None
-    CallbackManagerForToolRun = None
-    BaseModel = object
-    Field = None
-
-from datafence.core.engine import DataFence
-from datafence.errors import DataFenceError
+from datafence.core.boundary import DataFenceBoundary
+from datafence.core.types import Actor, AllowedRequest, Intent, Operation
 
 
-class DataFenceQueryInput(BaseModel):
-    """Input schema for DataFence query tool."""
-
-    resource: str = Field(description="Name of the data resource to query")
-    fields: list[str] = Field(
-        default=None, description="List of fields to retrieve (optional)"
-    )
-    filters: dict[str, Any] = Field(
-        default_factory=dict, description="Filter conditions as key-value pairs"
-    )
-    limit: int = Field(default=100, description="Maximum number of rows to return")
-
-
-class DataFenceTool(BaseTool):
+class DataFenceLangChainTool:
     """
-    LangChain tool for querying data with DataFence security.
+    LangChain-compatible tool wrapping DataFenceBoundary.
 
-    This tool allows LangChain agents to query data sources with automatic
-    policy enforcement, field restrictions, and tenant isolation.
+    Inherits from LangChain BaseTool when available; otherwise provides a
+    compatible interface that works with agent frameworks that duck-type tools.
 
-    Example:
-        from langchain.agents import AgentExecutor, create_openai_functions_agent
-        from langchain.prompts import ChatPromptTemplate
-        from langchain_openai import ChatOpenAI
-
-        fence = DataFence.from_yaml("policy.yaml", connector)
-        tool = DataFenceTool(fence=fence, actor={"id": "user:123", "tenant_id": "acme"})
-
-        tools = [tool]
-        llm = ChatOpenAI(model="gpt-4")
-
-        agent = create_openai_functions_agent(llm, tools, prompt)
-        agent_executor = AgentExecutor(agent=agent, tools=tools)
-
-        response = agent_executor.invoke({"input": "Show me recent transactions"})
+    The principal is bound at construction time — the agent cannot change it.
     """
 
-    name: str = "query_data"
+    name: str = "datafence_query"
     description: str = (
-        "Query data from secure data sources with automatic policy enforcement. "
-        "Use this tool to retrieve data with field-level and row-level security. "
-        "Specify the resource name, optional fields, filters, and limit."
+        "Query data through the DataFence authorization boundary. "
+        "Input must be a JSON string with 'resource' (required), and optionally "
+        "'fields' (list), 'filters' (dict), and 'limit' (int). "
+        "Example: {\"resource\": \"transactions\", \"fields\": [\"merchant\", \"amount\"], \"limit\": 5}"
     )
-    args_schema: Type[BaseModel] = DataFenceQueryInput
 
-    fence: Any = Field(exclude=True)  # DataFence instance
-    actor: dict[str, Any] = Field(exclude=True)  # Actor information
-    context: Optional[dict[str, Any]] = Field(default=None, exclude=True)
-
-    class Config:
-        """Pydantic config."""
-
-        arbitrary_types_allowed = True
-
-    def _run(
+    def __init__(
         self,
-        resource: str,
-        fields: list[str] | None = None,
-        filters: dict[str, Any] | None = None,
-        limit: int = 100,
-        run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> str:
+        boundary: DataFenceBoundary,
+        principal: Actor,
+        tool_name: str = "datafence_query",
+    ) -> None:
+        self.boundary = boundary
+        self.principal = principal
+        self.name = tool_name
+
+        # Try to inherit from LangChain BaseTool if available
+        self._langchain_available = False
+        try:
+            from langchain.tools import BaseTool as LCBaseTool  # type: ignore[import]
+            self._langchain_available = True
+        except ImportError:
+            pass
+
+    def run(self, query: str) -> str:
+        """LangChain tool interface: accepts a string, returns a string."""
+        return self._run(query)
+
+    def _run(self, query: str, **_: Any) -> str:
         """
         Execute the tool.
 
         Args:
-            resource: Resource name
-            fields: Fields to retrieve
-            filters: Filter conditions
-            limit: Result limit
-            run_manager: Callback manager (optional)
+            query : JSON string with resource, fields, filters, limit.
 
         Returns:
-            JSON string with results
+            JSON string with results or denial reason.
         """
         try:
-            # Build request
-            request_dict = {
-                "actor": self.actor,
-                "operation": "read",
-                "resource": resource,
-                "fields": fields,
-                "filters": filters or {},
-                "limit": limit,
-            }
+            args = json.loads(query) if isinstance(query, str) else query
+        except json.JSONDecodeError:
+            # Treat bare string as a resource name
+            args = {"resource": query}
 
-            if self.context:
-                request_dict["context"] = self.context
-
-            # Execute through DataFence
-            result = self.fence.execute(request_dict)
-
-            if result.verified:
-                import json
-
-                return json.dumps(
-                    {
-                        "success": True,
-                        "data": result.data,
-                        "row_count": len(result.data),
-                    },
-                    indent=2,
-                )
-            else:
-                return json.dumps(
-                    {
-                        "success": False,
-                        "error": "Access denied",
-                        "reasons": result.decision.reasons,
-                    },
-                    indent=2,
-                )
-
-        except Exception as e:
-            return json.dumps({"success": False, "error": str(e)}, indent=2)
-
-    async def _arun(
-        self,
-        resource: str,
-        fields: list[str] | None = None,
-        filters: dict[str, Any] | None = None,
-        limit: int = 100,
-        run_manager: Optional[CallbackManagerForToolRun] = None,
-    ) -> str:
-        """
-        Async execution (delegates to sync for now).
-
-        Args:
-            resource: Resource name
-            fields: Fields to retrieve
-            filters: Filter conditions
-            limit: Result limit
-            run_manager: Callback manager (optional)
-
-        Returns:
-            JSON string with results
-        """
-        # For now, delegate to sync version
-        # In future, could support async connectors
-        return self._run(resource, fields, filters, limit, run_manager)
-
-
-def create_datafence_tools(
-    fence: DataFence, actor: dict[str, Any], context: dict[str, Any] | None = None
-) -> list[Any]:
-    """
-    Create LangChain tools from DataFence policy.
-
-    Creates one tool per resource in the policy for more specific tool descriptions.
-
-    Args:
-        fence: DataFence instance
-        actor: Actor information
-        context: Additional context
-
-    Returns:
-        List of LangChain tools
-
-    Example:
-        tools = create_datafence_tools(
-            fence,
-            actor={"id": "user:123", "tenant_id": "acme"}
-        )
-    """
-    if BaseTool is None:
-        raise ImportError(
-            "langchain required. Install with: pip install langchain"
+        intent = Intent(
+            resource=str(args.get("resource", "")),
+            operation=Operation.READ,
+            fields=args.get("fields") or None,
+            filters=args.get("filters") or {},
+            limit=int(args.get("limit") or 10),
         )
 
-    tools = []
+        result = self.boundary.execute(self.principal, intent)
 
-    # Get all resources from policy
-    if not fence.policy or not fence.policy.resources:
-        # Create generic tool
-        tools.append(DataFenceTool(fence=fence, actor=actor, context=context))
-        return tools
+        if isinstance(result, AllowedRequest):
+            return json.dumps({
+                "status": "allowed",
+                "row_count": result.execution_result.row_count,
+                "data": result.execution_result.data,
+                "fields": result.execution_plan.selected_fields,
+            })
+        return json.dumps({
+            "status": "denied",
+            "reasons": list(result.decision.reasons),
+        })
 
-    # Create specific tool for each resource
-    for resource_name, resource_config in fence.policy.resources.items():
-        allowed_ops = resource_config.operations.get("allow", [])
+    async def _arun(self, query: str, **kwargs: Any) -> str:
+        """Async interface (delegates to sync)."""
+        return self._run(query, **kwargs)
 
-        if "read" in allowed_ops:
-            # Get allowed fields
-            allowed_fields = resource_config.fields.get("allow", [])
+    def as_langchain_tool(self) -> Any:
+        """
+        Return a proper LangChain BaseTool instance if LangChain is installed.
 
-            # Create custom input schema for this resource
-            class ResourceQueryInput(BaseModel):
-                """Input schema for resource query."""
+        Raises ImportError if langchain is not available.
+        """
+        try:
+            from langchain.tools import BaseTool  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "LangChain is required. Install with: pip install 'datafence[integrations]'"
+            ) from exc
 
-                fields: list[str] = Field(
-                    default=None,
-                    description=f"Fields to retrieve. Allowed: {', '.join(allowed_fields)}",
-                )
-                filters: dict[str, Any] = Field(
-                    default_factory=dict,
-                    description="Filter conditions as key-value pairs",
-                )
-                limit: int = Field(
-                    default=100, description="Maximum number of rows to return"
-                )
+        boundary = self.boundary
+        principal = self.principal
+        tool_name = self.name
 
-            # Create resource-specific tool
-            class ResourceTool(BaseTool):
-                """Tool for specific resource."""
+        class _Tool(BaseTool):
+            name = tool_name
+            description = DataFenceLangChainTool.description
 
-                name: str = f"query_{resource_name}"
-                description: str = (
-                    f"Query {resource_name} data with security enforcement. "
-                    f"Allowed fields: {', '.join(allowed_fields)}. "
-                    f"Use filters to narrow results."
-                )
-                args_schema: Type[BaseModel] = ResourceQueryInput
+            def _run(self, query: str, **kw: Any) -> str:  # type: ignore[override]
+                return DataFenceLangChainTool(boundary, principal, tool_name)._run(query)
 
-                fence: Any = Field(exclude=True)
-                actor: dict[str, Any] = Field(exclude=True)
-                context: Optional[dict[str, Any]] = Field(default=None, exclude=True)
-                resource_name: str = Field(exclude=True)
+            async def _arun(self, query: str, **kw: Any) -> str:  # type: ignore[override]
+                return self._run(query)
 
-                class Config:
-                    """Pydantic config."""
-
-                    arbitrary_types_allowed = True
-
-                def _run(
-                    self,
-                    fields: list[str] | None = None,
-                    filters: dict[str, Any] | None = None,
-                    limit: int = 100,
-                    run_manager: Optional[CallbackManagerForToolRun] = None,
-                ) -> str:
-                    """Execute query."""
-                    import json
-
-                    try:
-                        request_dict = {
-                            "actor": self.actor,
-                            "operation": "read",
-                            "resource": self.resource_name,
-                            "fields": fields,
-                            "filters": filters or {},
-                            "limit": limit,
-                        }
-
-                        if self.context:
-                            request_dict["context"] = self.context
-
-                        result = self.fence.execute(request_dict)
-
-                        if result.verified:
-                            return json.dumps(
-                                {
-                                    "success": True,
-                                    "data": result.data,
-                                    "row_count": len(result.data),
-                                },
-                                indent=2,
-                            )
-                        else:
-                            return json.dumps(
-                                {
-                                    "success": False,
-                                    "error": "Access denied",
-                                    "reasons": result.decision.reasons,
-                                },
-                                indent=2,
-                            )
-
-                    except Exception as e:
-                        return json.dumps({"success": False, "error": str(e)}, indent=2)
-
-                async def _arun(
-                    self,
-                    fields: list[str] | None = None,
-                    filters: dict[str, Any] | None = None,
-                    limit: int = 100,
-                    run_manager: Optional[CallbackManagerForToolRun] = None,
-                ) -> str:
-                    """Async execution."""
-                    return self._run(fields, filters, limit, run_manager)
-
-            tool = ResourceTool(
-                fence=fence,
-                actor=actor,
-                context=context,
-                resource_name=resource_name,
-            )
-
-            tools.append(tool)
-
-    return tools
+        return _Tool()

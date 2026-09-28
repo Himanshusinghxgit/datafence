@@ -1,16 +1,18 @@
 """
-DataFence Security Boundary (v0.4 - Hardened).
+DataFence Security Boundary (v0.5 - Unified Architecture).
 
 This is the core enforcement layer with cryptographic capabilities.
 
 Flow:
     Untrusted Request → Policy Evaluation → AuthorizedExecution (signed) → Execution → Validation
 
-SECURITY IMPROVEMENTS (v0.4):
+SECURITY IMPROVEMENTS:
 - Capabilities are cryptographically signed with HMAC
 - Connector is PRIVATE (not exposed in public API)
 - Capability cannot be forged without signing key
 - Defense in depth: API design + cryptography
+- New DataFencePolicyEngine supported (Phase 3)
+- Identifier validation in connectors (Phase 2)
 
 The database NEVER executes LLM-generated SQL directly.
 DataFence transforms the untrusted request into a signed capability.
@@ -19,6 +21,7 @@ The connector verifies the signature before execution.
 
 from typing import Protocol, Union
 from secrets import token_bytes
+from uuid import uuid4
 
 from datafence.core.types import (
     Actor,
@@ -396,28 +399,43 @@ class DataFenceBoundary:
     def _evaluate_policy(self, request: Request) -> PolicyDecision:
         """
         Evaluate policy for the request.
-        
-        Determines:
-        - Is this operation allowed?
-        - What fields can be accessed?
-        - What filters must be enforced?
-        - What limits apply?
+
+        Supports both the old SimplePolicyEngine (returns types.PolicyDecision)
+        and the new DataFencePolicyEngine (returns policy.PolicyDecision).
+        The result is normalised into a types.PolicyDecision for the rest of
+        the boundary pipeline.
         """
         actor = request.actor
         intent = request.intent
-
-        # Get requested fields (or all if none specified)
         requested_fields = intent.fields or []
 
-        # Evaluate policy
-        decision = self.policy_engine.evaluate(
+        raw_decision = self.policy_engine.evaluate(
             actor=actor,
             resource=intent.resource,
             operation=intent.operation,
             requested_fields=requested_fields,
         )
 
-        return decision
+        # ── New DataFencePolicyEngine returns policy.PolicyDecision ──────────
+        # It has .effect (PolicyEffect) and .is_allow / .is_deny properties.
+        if hasattr(raw_decision, 'effect'):
+            from datafence.core.policy import PolicyEffect
+            if raw_decision.effect == PolicyEffect.DENY:
+                return PolicyDecision(
+                    decision=Decision.DENY,
+                    reasons=list(raw_decision.reasons),
+                    policy_version=raw_decision.policy_version,
+                )
+            # ALLOW — carry forward matched_rules as matched_policies
+            return PolicyDecision(
+                decision=Decision.ALLOW,
+                reasons=[],
+                policy_version=raw_decision.policy_version,
+                matched_policies=list(raw_decision.matched_rules),
+            )
+
+        # ── Legacy SimplePolicyEngine returns types.PolicyDecision ───────────
+        return raw_decision
 
     def _create_execution_plan(
         self,
@@ -503,60 +521,96 @@ class DataFenceBoundary:
     ) -> AuthorizedExecution:
         """
         Create a cryptographically signed capability.
-        
-        This is the v0.4 hardened version of _create_execution_plan.
-        The capability includes an HMAC signature that prevents forgery.
+
+        Supports both old SimplePolicyEngine and new DataFencePolicyEngine.
+
+        With the NEW engine: allowed_fields, enforced_filter (resolved), and
+        row_limit come directly from the PolicyDecision produced by
+        DataFencePolicyEngine.evaluate().  The boundary no longer needs to
+        call get_allowed_fields / get_enforced_filters / get_max_limit separately.
+
+        With the OLD engine: falls back to calling those helper methods.
         """
         actor = request.actor
         intent = request.intent
 
-        # Get allowed fields (policy may restrict what LLM requested)
-        allowed_fields = self.policy_engine.get_allowed_fields(
+        # ── Try to use new PolicyDecision from DataFencePolicyEngine ─────────
+        # The raw_decision is cached in the engine; we re-evaluate to get it.
+        raw_decision = self.policy_engine.evaluate(
             actor=actor,
             resource=intent.resource,
+            operation=intent.operation,
+            requested_fields=intent.fields or [],
         )
 
-        # If LLM requested specific fields, intersect with allowed
-        if intent.fields:
-            selected_fields = [f for f in intent.fields if f in allowed_fields]
-        else:
-            selected_fields = allowed_fields
+        if hasattr(raw_decision, 'effect'):
+            # New engine — decision carries all we need
+            allowed_fields_list = list(raw_decision.allowed_fields)
 
-        if not selected_fields:
-            raise ValueError("No authorized fields available")
-
-        # Get enforced filters (e.g., tenant_id)
-        enforced_filters = self.policy_engine.get_enforced_filters(
-            actor=actor,
-            resource=intent.resource,
-        )
-
-        # Apply actor context to filters
-        resolved_filters = {}
-        for key, value in enforced_filters.items():
-            if value == ":actor_tenant_id":
-                resolved_filters[key] = actor.tenant_id
-            elif value == ":actor_id":
-                resolved_filters[key] = actor.id
+            # Intersect with requested fields if specified
+            if intent.fields:
+                selected_fields = [f for f in intent.fields if f in allowed_fields_list]
             else:
-                resolved_filters[key] = value
+                selected_fields = allowed_fields_list
 
-        # Add LLM's filters IF they don't conflict with enforced filters
-        for key, value in intent.filters.items():
-            if key not in resolved_filters:
-                resolved_filters[key] = value
+            if not selected_fields:
+                raise ValueError("No authorized fields available")
 
-        # Get limit
-        max_limit = self.policy_engine.get_max_limit(
-            actor=actor,
-            resource=intent.resource,
-        )
-        limit = min(intent.limit or max_limit, max_limit)
+            # enforced_filter is already resolved (actor refs replaced with values)
+            resolved_filters = raw_decision.enforced_filter.to_dict()
 
-        # Import uuid for execution_id
-        from uuid import uuid4
-        
-        # Create signed capability
+            # Add intent filters that don't conflict with policy filters
+            for key, value in intent.filters.items():
+                if key not in resolved_filters:
+                    resolved_filters[key] = value
+
+            limit = raw_decision.row_limit.value
+            if intent.limit:
+                limit = min(intent.limit, limit)
+
+            policy_version = raw_decision.policy_version
+
+        else:
+            # Old engine — call helper methods
+            allowed_fields = self.policy_engine.get_allowed_fields(
+                actor=actor,
+                resource=intent.resource,
+            )
+
+            if intent.fields:
+                selected_fields = [f for f in intent.fields if f in allowed_fields]
+            else:
+                selected_fields = allowed_fields
+
+            if not selected_fields:
+                raise ValueError("No authorized fields available")
+
+            enforced_filters = self.policy_engine.get_enforced_filters(
+                actor=actor,
+                resource=intent.resource,
+            )
+
+            resolved_filters = {}
+            for key, value in enforced_filters.items():
+                if value == ":actor_tenant_id":
+                    resolved_filters[key] = actor.tenant_id
+                elif value == ":actor_id":
+                    resolved_filters[key] = actor.id
+                else:
+                    resolved_filters[key] = value
+
+            for key, value in intent.filters.items():
+                if key not in resolved_filters:
+                    resolved_filters[key] = value
+
+            max_limit = self.policy_engine.get_max_limit(
+                actor=actor,
+                resource=intent.resource,
+            )
+            limit = min(intent.limit or max_limit, max_limit)
+            policy_version = self.policy_engine.get_policy_version()
+
+        # Build signed capability
         capability = AuthorizedExecution.create_signed(
             execution_id=f"exec_{uuid4().hex[:16]}",
             actor=actor,
@@ -565,8 +619,8 @@ class DataFenceBoundary:
             selected_fields=selected_fields,
             enforced_filters=resolved_filters,
             limit=limit,
-            policy_version=self.policy_engine.get_policy_version(),
-            policy_decisions=policy_decision.matched_policies,
+            policy_version=policy_version,
+            policy_decisions=list(policy_decision.matched_policies),
             signing_key=self._signing_key,
         )
 

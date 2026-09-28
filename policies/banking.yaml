@@ -1,64 +1,62 @@
-version: "1"
+name: banking-demo-v1
+version: "1.0"
 
-policy:
-  name: banking-transactions
-  
-  resources:
-    transactions:
-      operations:
-        allow:
-          - read
-        deny:
-          - insert
-          - update
-          - delete
-      
-      fields:
-        allow:
-          - transaction_id
-          - customer_id
-          - merchant
-          - amount
-          - currency
-          - timestamp
-          - category
-        deny:
-          - card_number
-          - cvv
-          - account_number
-          - full_account_number
-      
-      row_filters:
-        customer_id: "{{ actor.customer_id }}"
-      
-      limits:
-        max_rows: 1000
-        max_date_range_days: 90
-    
-    accounts:
-      operations:
-        allow:
-          - read
-        deny:
-          - insert
-          - update
-          - delete
-      
-      fields:
-        allow:
-          - account_id
-          - customer_id
-          - account_type
-          - balance
-          - currency
-          - status
-        deny:
-          - account_number
-          - routing_number
-          - ssn
-      
-      row_filters:
-        customer_id: "{{ actor.customer_id }}"
-      
-      limits:
-        max_rows: 100
+resources:
+  transactions:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow:
+        - id
+        - merchant
+        - amount
+        - timestamp
+      deny:
+        - card_number
+        - account_number
+    rows:
+      - field: tenant_id
+        operator: equals
+        value: ":actor_tenant_id"
+    limits:
+      rows: 100
+    obligations:
+      audit: true
+
+  customers:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow:
+        - id
+        - name
+        - email
+      deny:
+        - ssn
+        - account_number
+    rows:
+      - field: tenant_id
+        operator: equals
+        value: ":actor_tenant_id"
+    limits:
+      rows: 100
+
+  accounts:
+    actions:
+      read: deny
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow: []
+      deny:
+        - account_number
+        - balance
+    limits:
+      rows: 0

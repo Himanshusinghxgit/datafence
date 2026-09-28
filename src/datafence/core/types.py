@@ -106,14 +106,28 @@ class PolicyDecision:
 @dataclass(frozen=True)
 class ExecutionPlan:
     """
-    Authorized execution plan.
+    Authorized execution plan — DESCRIPTIVE / AUDIT OBJECT ONLY.
+
+    THIS IS NOT THE EXECUTION CAPABILITY.
     
-    THIS IS THE CORE ABSTRACTION.
-    
-    The ExecutionPlan represents exactly what DataFence has authorized.
-    The database executes THIS, not the LLM's raw SQL.
-    
-    The connector MUST accept ExecutionPlan, not raw SQL from the LLM.
+    ExecutionPlan documents WHAT DataFence decided (for audit / evidence trails).
+    The EXECUTABLE artifact is AuthorizedExecution (see capability.py).
+
+    ExecutionPlan is created INTERNALLY by DataFenceBoundary after a successful
+    AuthorizedExecution.  External code MUST NOT construct ExecutionPlan directly
+    and pass it to a connector — connectors reject it.  Use DataFenceBoundary.execute().
+
+    Role in the pipeline:
+        Intent (untrusted)
+            ↓  policy evaluation
+        AuthorizedExecution (signed, executable)  ← what the connector receives
+            ↓  connector executes
+        ExecutionResult
+            ↓  boundary wraps for caller
+        AllowedRequest.execution_plan  ← this field holds an ExecutionPlan (audit copy)
+
+    So every AllowedRequest carries an ExecutionPlan for evidence/logging, but
+    the connector never sees it.
     """
 
     execution_id: str

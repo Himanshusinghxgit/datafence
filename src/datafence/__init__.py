@@ -1,37 +1,57 @@
 """
-DataFence - A deterministic security boundary between AI agents and enterprise data.
+DataFence — Policy-Enforced Data Execution for AI.
 
 The core principle: The model proposes. DataFence decides.
 
-Version 0.4.0 - Cryptographic Capability Model
------------------------------------------------
+Version 0.5.0 — Unified architecture
+--------------------------------------
 
-v0.4 introduces cryptographically signed capabilities with HMAC-SHA256,
-eliminating forgery attacks discovered in v0.3 security review.
+What's new in v0.5:
+  - Typed Resource/Execution IR (ResourceRef, FieldRef, Predicate, Filter)
+  - Identifier validation — no f-string interpolation of SQL identifiers
+  - Enhanced policy model (DataFencePolicyEngine, YAML loader, Obligations)
+  - Policy INJECTS row filters; the LLM cannot bypass or override them
+  - PostgreSQL, Athena, Snowflake connectors on the new capability interface
+  - MCP server + tool (Phase 6)
+  - OpenAI, Anthropic, LangChain thin adapters (Phase 7)
+  - ExecutionPlan clearly marked as audit/evidence only (not executable)
 
-RECOMMENDED API (v0.4):
-    from datafence.core.boundary import DataFenceBoundary
-    
+Recommended usage::
+
+    from datafence import DataFenceBoundary, Actor, Intent, Operation
+    from datafence.core.policy import create_banking_policy
+    from datafence.connectors.sqlite_connector import create_demo_database
+
     boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
+        policy_engine=create_banking_policy(),
         connector_factory=create_demo_database,
-        database_path=db_path
+        database_path="/path/to/db.sqlite",
     )
-    
-    result = boundary.execute(actor, intent)
 
-LEGACY API (v0.1-v0.3, DEPRECATED):
-    from datafence import DataFence  # OLD - Insecure
-    
-    The legacy DataFence engine lacks cryptographic signatures and is
-    vulnerable to capability forgery attacks. Use DataFenceBoundary instead.
+    principal = Actor(id="agent:finance", tenant_id="acme-corp")
+    intent = Intent(
+        resource="transactions",
+        operation=Operation.READ,
+        fields=["id", "merchant", "amount"],
+    )
+
+    result = boundary.execute(principal, intent)
+
+LEGACY API (v0.1–v0.4, deprecated)::
+
+    from datafence import DataFence  # old engine, insecure
 """
 
-# v0.4 API (RECOMMENDED)
+# ---------------------------------------------------------------------------
+# v0.5 core API
+# ---------------------------------------------------------------------------
+
 from datafence.core.boundary import DataFenceBoundary
+
 from datafence.core.types import (
     Actor,
     AllowedRequest,
+    AuditEvent,
     Decision,
     DeniedRequest,
     Evidence,
@@ -39,19 +59,52 @@ from datafence.core.types import (
     ExecutionResult,
     Intent,
     Operation,
+    PolicyDecision,
     Request,
 )
 
-# Legacy v0.1-v0.3 API (DEPRECATED)
+# Typed IR
+from datafence.core.resources import (
+    FieldRef,
+    Filter,
+    Predicate,
+    PredicateOperator,
+    Projection,
+    ResourceRef,
+    RowLimit,
+)
+
+# Enhanced policy model
+from datafence.core.policy import (
+    ActionDecision,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    PolicyEffect,
+    ResourcePolicy,
+    RowRule,
+    YAMLPolicyLoader,
+    create_banking_policy,
+)
+
+# Capability
+from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
+
+# ---------------------------------------------------------------------------
+# Legacy v0.1–v0.4 API (deprecated — kept for backward compatibility)
+# ---------------------------------------------------------------------------
+
 from datafence.core.context import ActorType, RequestContext
 from datafence.core.context import Actor as LegacyActor
 from datafence.core.decision import DecisionStatus
 from datafence.core.decision import Decision as LegacyDecision
-from datafence.core.engine import DataFence  # DEPRECATED
+from datafence.core.engine import DataFence          # DEPRECATED
 from datafence.core.request import ExecutionRequest
 from datafence.core.result import ExecutionResult as LegacyExecutionResult
 
+# ---------------------------------------------------------------------------
 # Errors
+# ---------------------------------------------------------------------------
+
 from datafence.errors import (
     ConfigurationError,
     ConnectorError,
@@ -62,24 +115,51 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
-    # ===== v0.4 API (RECOMMENDED) =====
+    # ===== Core v0.5 API =====
     "DataFenceBoundary",
+
+    # Types
     "Actor",
     "Intent",
     "Request",
+    "Operation",
+    "Decision",
+    "PolicyDecision",
     "ExecutionPlan",
+    "ExecutionResult",
     "AllowedRequest",
     "DeniedRequest",
-    "ExecutionResult",
     "Evidence",
-    "Decision",
-    "Operation",
-    
-    # ===== Legacy API (DEPRECATED) =====
-    "DataFence",  # DEPRECATED: Use DataFenceBoundary
+    "AuditEvent",
+
+    # Typed IR
+    "ResourceRef",
+    "FieldRef",
+    "Predicate",
+    "PredicateOperator",
+    "Filter",
+    "Projection",
+    "RowLimit",
+
+    # Policy
+    "DataFencePolicyEngine",
+    "DataFencePolicy",
+    "ResourcePolicy",
+    "RowRule",
+    "ActionDecision",
+    "PolicyEffect",
+    "YAMLPolicyLoader",
+    "create_banking_policy",
+
+    # Capability
+    "AuthorizedExecution",
+    "CapabilityVerificationError",
+
+    # ===== Legacy API (deprecated) =====
+    "DataFence",
     "ExecutionRequest",
     "LegacyExecutionResult",
     "RequestContext",
@@ -87,7 +167,7 @@ __all__ = [
     "ActorType",
     "LegacyDecision",
     "DecisionStatus",
-    
+
     # ===== Errors =====
     "DataFenceError",
     "PolicyError",

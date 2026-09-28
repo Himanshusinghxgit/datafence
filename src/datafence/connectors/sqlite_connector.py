@@ -1,333 +1,312 @@
 """
-SQLite connector for DataFence (v0.4 - Hardened).
+SQLite connector for DataFence (v0.5 - typed IR, safe identifier compilation).
 
-CRITICAL SECURITY PROPERTIES (v0.4):
+CRITICAL SECURITY PROPERTIES:
     - Connector verifies cryptographic signature before execution
     - Connector accepts ONLY signed AuthorizedExecution capabilities
+    - Identifiers (table/column names) are validated against a strict
+      allowlist pattern — NO f-string interpolation of untrusted strings
     - Connector does NOT accept raw SQL from the LLM
     - Connector rejects forged/tampered capabilities
-    
+
 Flow:
-    AuthorizedExecution (signed) → verify_signature() → generate_sql() → prepared_statement → database
+    AuthorizedExecution (signed)
+        → verify_signature()
+        → _compile_select()     ← identifiers validated here
+        → prepared statement    ← values parameterised
+        → database
+        → result filtered to authorised fields
 
-The database executes DataFence's authorized SQL, not the LLM's SQL.
-
-SECURITY IMPROVEMENTS:
-- HMAC signature verification prevents forgery
-- Defense in depth: API design + cryptography
-- Legacy execute_plan() kept for backward compatibility (deprecated)
+The SQL compiler receives AuthorizedExecution and builds the query entirely
+from validated identifiers.  Values are always passed as query parameters,
+never interpolated.
 """
+
+from __future__ import annotations
 
 import sqlite3
 from typing import Any
 
-from datafence.core.types import ExecutionPlan, Operation
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
+from datafence.core.resources import validate_identifier
+from datafence.core.types import Operation
 
 
 class SQLiteConnector:
     """
-    SQLite connector that enforces cryptographic capabilities (v0.4 - Hardened).
-    
+    SQLite connector with cryptographic capability verification (v0.5).
+
     The connector:
-    1. Verifies HMAC signature on AuthorizedExecution
-    2. Rejects forged/tampered capabilities
-    3. Generates SQL from the capability (not from LLM)
-    4. Uses prepared statements with parameters
-    5. Returns ONLY the fields in the capability
-    
+    1. Verifies HMAC signature on AuthorizedExecution — rejects forgeries.
+    2. Validates every identifier (table + column names) before use.
+    3. Generates parameterised SQL — values never interpolated.
+    4. Returns ONLY the fields listed in the capability.
+
     SECURITY:
-    - Signing key is received at construction (NEVER passed through public API)
-    - Capability signature is verified BEFORE execution
-    - Invalid signature = SecurityError (no data returned)
-    
-    IMPORTANT: This connector is INTERNAL to DataFenceBoundary.
-    It should NOT be instantiated directly by application code.
+    - Signing key received at construction (NEVER through execute()).
+    - Capability signature verified BEFORE any SQL is generated.
+    - Identifier validation prevents injection even from a compromised policy.
+
+    This connector is INTERNAL to DataFenceBoundary.
+    Application code should not instantiate it directly.
     """
 
-    def __init__(self, database_path: str, signing_key: bytes):
+    def __init__(self, database_path: str, signing_key: bytes) -> None:
         """
-        Initialize SQLite connector.
-        
+        Initialise the connector.
+
         Args:
-            database_path: Path to SQLite database
-            signing_key: Secret key for capability verification (32 bytes)
-        
-        SECURITY: The signing_key should come from DataFenceBoundary.
-        The application should never handle or see this key.
+            database_path : Path to the SQLite database file.
+            signing_key   : 32-byte HMAC key shared with DataFenceBoundary.
         """
         self.database_path = database_path
-        self._signing_key = signing_key  # PRIVATE - never expose
+        self._signing_key = signing_key          # PRIVATE — never expose
         self.connection = sqlite3.connect(database_path)
-        self.connection.row_factory = sqlite3.Row  # Return rows as dicts
+        self.connection.row_factory = sqlite3.Row
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def execute(self, capability: AuthorizedExecution) -> list[dict[str, Any]]:
         """
-        Execute a signed capability (v0.4 - Hardened).
-        
-        This is the ONLY execution method. No execute_plan(), no execute_sql().
-        
-        SECURITY:
-        - Verifies HMAC signature before execution
-        - Rejects forged capabilities
-        - Capability specifies EXACTLY what is authorized
-        - SQL is generated from the capability (not from LLM)
-        - Prepared statements prevent injection
-        - Only authorized fields are returned
-        
-        Args:
-            capability: Signed AuthorizedExecution
-        
-        Returns:
-            Query results
-        
+        Execute a signed capability.
+
+        This is the ONLY execution method — no execute_plan(), no execute_sql().
+
         Raises:
-            CapabilityVerificationError: If signature is invalid
+            CapabilityVerificationError: If the HMAC signature is invalid.
         """
-        # SECURITY CHECK: Verify cryptographic signature
+        # 1. Verify cryptographic signature
         if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
-                f"Invalid capability signature for execution {capability.execution_id}. "
+                f"Invalid capability signature for execution "
+                f"{capability.execution_id!r}. "
                 "The capability may be forged or tampered with."
             )
-        
-        # Generate SQL from verified capability
-        sql, params = self._generate_sql_from_capability(capability)
 
-        # Execute with prepared statement
+        # 2. Compile SQL from verified capability
+        sql, params = self._compile(capability)
+
+        # 3. Execute
         cursor = self.connection.cursor()
         cursor.execute(sql, params)
-
-        # Fetch results
         rows = cursor.fetchall()
 
-        # Convert to list of dicts, ensuring ONLY authorized fields
-        results = []
-        for row in rows:
-            # Only include fields from the capability
-            filtered_row = {
-                field: row[field]
-                for field in capability.selected_fields
-                if field in row.keys()
-            }
-            results.append(filtered_row)
+        # 4. Return only authorised fields (defence-in-depth)
+        authorised = set(capability.selected_fields)
+        return [
+            {col: row[col] for col in capability.selected_fields if col in row.keys()}
+            for row in rows
+        ]
 
-        return results
+    # ------------------------------------------------------------------
+    # SQL compiler
+    # ------------------------------------------------------------------
 
-    def _generate_sql_from_capability(
-        self,
-        capability: AuthorizedExecution,
+    def _compile(
+        self, capability: AuthorizedExecution
     ) -> tuple[str, dict[str, Any]]:
-        """
-        Generate SQL from AuthorizedExecution capability.
-        
-        The SQL is constructed from the capability, NOT from LLM input.
-        """
         if capability.operation == Operation.READ:
-            return self._generate_select_from_capability(capability)
-        elif capability.operation == Operation.INSERT:
-            raise NotImplementedError("INSERT not implemented in demo")
-        elif capability.operation == Operation.UPDATE:
-            raise NotImplementedError("UPDATE not implemented in demo")
-        elif capability.operation == Operation.DELETE:
-            raise NotImplementedError("DELETE not implemented in demo")
-        else:
-            raise ValueError(f"Unknown operation: {capability.operation}")
+            return self._compile_select(capability)
+        raise NotImplementedError(
+            f"Operation {capability.operation!r} not implemented in SQLiteConnector"
+        )
 
-    def _generate_select_from_capability(
-        self,
-        capability: AuthorizedExecution,
+    def _compile_select(
+        self, capability: AuthorizedExecution
     ) -> tuple[str, dict[str, Any]]:
         """
-        Generate SELECT statement from capability.
-        
-        The LLM may have requested:
-            SELECT * FROM transactions
-        
-        But DataFence generates:
+        Compile a SELECT statement from a verified AuthorizedExecution.
+
+        All identifiers (table + column names) are validated with
+        validate_identifier() before being placed in the query.
+        All filter values are passed as named parameters — never interpolated.
+
+        Example output:
             SELECT id, merchant, amount, timestamp
             FROM transactions
-            WHERE tenant_id = :tenant_id
+            WHERE tenant_id = :filter_0
             LIMIT 100
-        
-        based on the verified capability.
         """
-        # SELECT clause - ONLY authorized fields
-        fields = ", ".join(capability.selected_fields)
-        sql = f"SELECT {fields} FROM {capability.resource}"
+        # Validate resource name
+        resource = validate_identifier(
+            capability.resource, context="resource name"
+        )
 
-        # WHERE clause - enforced filters
-        params = {}
+        # Validate and quote field names
+        fields_sql = ", ".join(
+            validate_identifier(f, context="field name")
+            for f in capability.selected_fields
+        )
+
+        sql = f"SELECT {fields_sql} FROM {resource}"
+
+        # WHERE clause — filter values always parameterised
+        params: dict[str, Any] = {}
         if capability.enforced_filters:
-            conditions = []
-            for i, (key, value) in enumerate(capability.enforced_filters.items()):
+            conditions: list[str] = []
+            for i, (col, val) in enumerate(capability.enforced_filters.items()):
+                safe_col = validate_identifier(col, context="filter column")
                 param_name = f"filter_{i}"
-                conditions.append(f"{key} = :{param_name}")
-                params[param_name] = value
-
+                conditions.append(f"{safe_col} = :{param_name}")
+                params[param_name] = val
             sql += " WHERE " + " AND ".join(conditions)
 
-        # LIMIT clause - enforced limit
-        sql += f" LIMIT {capability.limit}"
+        # LIMIT — integer, never a string, never from the LLM
+        sql += f" LIMIT {int(capability.limit)}"
 
         return sql, params
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-    def close(self):
-        """Close database connection."""
+    def close(self) -> None:
         if self.connection:
             self.connection.close()
 
-    def __enter__(self):
+    def __enter__(self) -> "SQLiteConnector":
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, *_: Any) -> None:
         self.close()
 
 
+# ---------------------------------------------------------------------------
+# Malicious connector — TESTING ONLY
+# ---------------------------------------------------------------------------
+
 class MaliciousConnector(SQLiteConnector):
     """
-    A malicious connector for testing result validation.
-    
-    This connector attempts to return unauthorized fields.
-    DataFence's result validation MUST catch this.
-    
-    NOTE: This is for TESTING ONLY. In v0.4, it bypasses signature
-    verification to test result validation.
+    Test helper: a connector that injects unauthorised fields into results.
+
+    DataFence's ResultValidator MUST catch and reject these.
+    Signature verification is intentionally skipped so the test isolates
+    the validation layer.
     """
 
     def execute(self, capability: AuthorizedExecution) -> list[dict[str, Any]]:
-        """
-        Execute capability but attempt to return unauthorized fields.
-        
-        This tests whether DataFence's result validation works.
-        
-        IMPORTANT: For testing, we skip signature verification
-        to isolate the result validation test.
-        """
-        # Generate SQL (skip signature verification for this test)
-        sql, params = self._generate_sql_from_capability(capability)
+        # Skip signature verification — we're testing ResultValidator, not HMAC
+        sql, params = self._compile(capability)
         cursor = self.connection.cursor()
         cursor.execute(sql, params)
         rows = cursor.fetchall()
 
-        # MALICIOUS: Add unauthorized fields
-        results = []
-        for row in rows:
-            malicious_row = dict(row)
-            # Add fields that weren't authorized
-            malicious_row["card_number"] = "1234-5678-9012-3456"
-            malicious_row["ssn"] = "123-45-6789"
-            results.append(malicious_row)
+        return [
+            {**dict(row), "card_number": "1234-5678-9012-3456", "ssn": "123-45-6789"}
+            for row in rows
+        ]
 
-        return results
 
+# ---------------------------------------------------------------------------
+# Demo database factory
+# ---------------------------------------------------------------------------
 
 def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnector:
     """
-    Create the demo database for the killer demo.
-    
+    Create (or re-create) the demo database and return a connector.
+
+    Schema
+    ------
+    customers    (id, tenant_id, name, email, ssn, account_number)
+    transactions (id, tenant_id, customer_id, merchant, amount, timestamp, card_number)
+    accounts     (id, tenant_id, customer_id, account_number, balance)
+
+    Two tenants are populated: tenant_a and tenant_b.
+
     Args:
-        database_path: Path to SQLite database file
-        signing_key: Signing key for capability verification (32 bytes)
-    
+        database_path : Path to SQLite file.
+        signing_key   : 32-byte HMAC key for the returned connector.
+
     Returns:
-        Configured SQLiteConnector
-    
-    Schema:
-    - customers (id, tenant_id, name, email, ssn, account_number)
-    - transactions (id, tenant_id, customer_id, merchant, amount, timestamp, card_number)
-    - accounts (id, tenant_id, customer_id, account_number, balance)
+        Configured SQLiteConnector connected to the populated database.
     """
     conn = sqlite3.connect(database_path)
-    cursor = conn.cursor()
+    cur = conn.cursor()
 
-    # Drop existing tables
-    cursor.execute("DROP TABLE IF EXISTS customers")
-    cursor.execute("DROP TABLE IF EXISTS transactions")
-    cursor.execute("DROP TABLE IF EXISTS accounts")
+    cur.execute("DROP TABLE IF EXISTS customers")
+    cur.execute("DROP TABLE IF EXISTS transactions")
+    cur.execute("DROP TABLE IF EXISTS accounts")
 
-    # Create customers table
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE customers (
-            id INTEGER PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            ssn TEXT NOT NULL,
+            id             INTEGER PRIMARY KEY,
+            tenant_id      TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            email          TEXT NOT NULL,
+            ssn            TEXT NOT NULL,
             account_number TEXT NOT NULL
         )
     """)
-
-    # Create transactions table
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE transactions (
-            id INTEGER PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
+            id          INTEGER PRIMARY KEY,
+            tenant_id   TEXT NOT NULL,
             customer_id INTEGER NOT NULL,
-            merchant TEXT NOT NULL,
-            amount REAL NOT NULL,
-            timestamp TEXT NOT NULL,
+            merchant    TEXT NOT NULL,
+            amount      REAL NOT NULL,
+            timestamp   TEXT NOT NULL,
             card_number TEXT NOT NULL
         )
     """)
-
-    # Create accounts table
-    cursor.execute("""
+    cur.execute("""
         CREATE TABLE accounts (
-            id INTEGER PRIMARY KEY,
-            tenant_id TEXT NOT NULL,
-            customer_id INTEGER NOT NULL,
+            id             INTEGER PRIMARY KEY,
+            tenant_id      TEXT NOT NULL,
+            customer_id    INTEGER NOT NULL,
             account_number TEXT NOT NULL,
-            balance REAL NOT NULL
+            balance        REAL NOT NULL
         )
     """)
 
-    # Insert tenant_a data
-    cursor.execute("""
-        INSERT INTO customers (id, tenant_id, name, email, ssn, account_number)
-        VALUES
-            (1, 'tenant_a', 'Alice Johnson', 'alice@tenant-a.com', '123-45-6789', 'ACC-A-001'),
-            (2, 'tenant_a', 'Bob Smith', 'bob@tenant-a.com', '234-56-7890', 'ACC-A-002')
-    """)
+    # Tenant A
+    cur.executemany(
+        "INSERT INTO customers VALUES (?,?,?,?,?,?)",
+        [
+            (1, "tenant_a", "Alice Johnson", "alice@tenant-a.com", "123-45-6789", "ACC-A-001"),
+            (2, "tenant_a", "Bob Smith",     "bob@tenant-a.com",   "234-56-7890", "ACC-A-002"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO transactions VALUES (?,?,?,?,?,?,?)",
+        [
+            (1, "tenant_a", 1, "Amazon",    49.99, "2024-01-15 10:30:00", "4532-1111-2222-3333"),
+            (2, "tenant_a", 1, "Starbucks",  5.50, "2024-01-15 14:20:00", "4532-1111-2222-3333"),
+            (3, "tenant_a", 2, "Target",   125.00, "2024-01-16 09:15:00", "4532-4444-5555-6666"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO accounts VALUES (?,?,?,?,?)",
+        [
+            (1, "tenant_a", 1, "ACC-A-001",  5000.00),
+            (2, "tenant_a", 2, "ACC-A-002", 12000.00),
+        ],
+    )
 
-    cursor.execute("""
-        INSERT INTO transactions (id, tenant_id, customer_id, merchant, amount, timestamp, card_number)
-        VALUES
-            (1, 'tenant_a', 1, 'Amazon', 49.99, '2024-01-15 10:30:00', '4532-1111-2222-3333'),
-            (2, 'tenant_a', 1, 'Starbucks', 5.50, '2024-01-15 14:20:00', '4532-1111-2222-3333'),
-            (3, 'tenant_a', 2, 'Target', 125.00, '2024-01-16 09:15:00', '4532-4444-5555-6666')
-    """)
-
-    cursor.execute("""
-        INSERT INTO accounts (id, tenant_id, customer_id, account_number, balance)
-        VALUES
-            (1, 'tenant_a', 1, 'ACC-A-001', 5000.00),
-            (2, 'tenant_a', 2, 'ACC-A-002', 12000.00)
-    """)
-
-    # Insert tenant_b data
-    cursor.execute("""
-        INSERT INTO customers (id, tenant_id, name, email, ssn, account_number)
-        VALUES
-            (3, 'tenant_b', 'Charlie Brown', 'charlie@tenant-b.com', '345-67-8901', 'ACC-B-001'),
-            (4, 'tenant_b', 'Diana Prince', 'diana@tenant-b.com', '456-78-9012', 'ACC-B-002')
-    """)
-
-    cursor.execute("""
-        INSERT INTO transactions (id, tenant_id, customer_id, merchant, amount, timestamp, card_number)
-        VALUES
-            (4, 'tenant_b', 3, 'Walmart', 75.25, '2024-01-15 11:00:00', '5555-7777-8888-9999'),
-            (5, 'tenant_b', 3, 'Shell Gas', 45.00, '2024-01-16 08:30:00', '5555-7777-8888-9999'),
-            (6, 'tenant_b', 4, 'Apple Store', 999.00, '2024-01-16 15:45:00', '5555-1111-2222-3333')
-    """)
-
-    cursor.execute("""
-        INSERT INTO accounts (id, tenant_id, customer_id, account_number, balance)
-        VALUES
-            (3, 'tenant_b', 3, 'ACC-B-001', 8000.00),
-            (4, 'tenant_b', 4, 'ACC-B-002', 25000.00)
-    """)
+    # Tenant B
+    cur.executemany(
+        "INSERT INTO customers VALUES (?,?,?,?,?,?)",
+        [
+            (3, "tenant_b", "Charlie Brown", "charlie@tenant-b.com", "345-67-8901", "ACC-B-001"),
+            (4, "tenant_b", "Diana Prince",  "diana@tenant-b.com",   "456-78-9012", "ACC-B-002"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO transactions VALUES (?,?,?,?,?,?,?)",
+        [
+            (4, "tenant_b", 3, "Walmart",     75.25, "2024-01-15 11:00:00", "5555-7777-8888-9999"),
+            (5, "tenant_b", 3, "Shell Gas",   45.00, "2024-01-16 08:30:00", "5555-7777-8888-9999"),
+            (6, "tenant_b", 4, "Apple Store", 999.00, "2024-01-16 15:45:00", "5555-1111-2222-3333"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO accounts VALUES (?,?,?,?,?)",
+        [
+            (3, "tenant_b", 3, "ACC-B-001",  8000.00),
+            (4, "tenant_b", 4, "ACC-B-002", 25000.00),
+        ],
+    )
 
     conn.commit()
     conn.close()
