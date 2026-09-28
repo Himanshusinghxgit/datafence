@@ -19,7 +19,7 @@ DataFence transforms the untrusted request into a signed capability.
 The connector verifies the signature before execution.
 """
 
-from typing import Protocol, Union
+from typing import Any, Protocol, Union
 from secrets import token_bytes
 from uuid import uuid4
 
@@ -297,96 +297,66 @@ class DataFenceBoundary:
         intent: Intent,
     ) -> Union[AllowedRequest, DeniedRequest]:
         """
-        Execute a request through the security boundary (v0.4 - Hardened).
-        
+        Execute a request through the security boundary (v0.5).
+
         Flow:
-        1. Create Request (Actor + Intent)
-        2. Evaluate Policy
-        3. If DENY: return DeniedRequest
-        4. If ALLOW: create signed AuthorizedExecution
-        5. Execute via PRIVATE connector (verifies signature)
-        6. Validate result
-        7. Generate evidence
-        8. Return AllowedRequest
-        
-        SECURITY (v0.4):
-        - Capability is cryptographically signed
-        - Connector is private (cannot be called externally)
-        - Connector verifies signature before execution
-        - Defense in depth: API design + cryptography
-        
-        CRITICAL: The database never sees the LLM's raw SQL.
+            1. Normalize request (actor + intent → Request)
+            2. Evaluate policy ONCE → raw_decision
+            3. If DENY → DeniedRequest (fail closed)
+            4. Build signed AuthorizedExecution from raw_decision (no re-evaluation)
+            5. Execute via PRIVATE connector (verifies HMAC before any SQL)
+            6. Validate result (defense in depth)
+            7. Generate Evidence
+            8. Return AllowedRequest
+
+        Security:
+            - Policy evaluated exactly once; capability built from that result
+            - Connector is private — external code cannot call it
+            - Connector verifies HMAC signature before execution
+            - Result validator catches any unauthorized fields from connector
+            - Fail closed on every error path
         """
-        # Step 1: Create request
         request = Request.create(actor, intent)
 
-        # Step 2: Evaluate policy
+        # Step 2: single policy evaluation — raw decision passed to capability builder
         try:
-            policy_decision = self._evaluate_policy(request)
-        except Exception as e:
-            # Fail closed: treat evaluation errors as DENY
-            policy_decision = PolicyDecision(
-                decision=Decision.DENY,
-                reasons=[f"Policy evaluation failed: {str(e)}"],
-                policy_version=self.policy_engine.get_policy_version(),
+            raw_decision = self.policy_engine.evaluate(
+                actor=actor,
+                resource=intent.resource,
+                operation=intent.operation,
+                requested_fields=intent.fields or [],
             )
+        except Exception as exc:
+            return self._denied(request, [f"Policy evaluation failed: {exc}"])
 
-        # Step 3: If denied, return immediately
-        if policy_decision.decision == Decision.DENY:
-            return self._create_denied_request(request, policy_decision)
+        # Step 3: check decision
+        if self._is_deny(raw_decision):
+            return self._denied(request, self._reasons(raw_decision))
 
-        # Step 4: Create signed AuthorizedExecution capability
+        # Step 4: build signed capability from the exact decision (no re-evaluation)
         try:
-            capability = self._create_signed_capability(request, policy_decision)
-        except Exception as e:
-            # Fail closed: treat capability creation errors as DENY
-            policy_decision = PolicyDecision(
-                decision=Decision.DENY,
-                reasons=[f"Capability creation failed: {str(e)}"],
-                policy_version=self.policy_engine.get_policy_version(),
-            )
-            return self._create_denied_request(request, policy_decision)
+            capability = self._build_capability(request, raw_decision)
+        except Exception as exc:
+            return self._denied(request, [f"Capability creation failed: {exc}"])
 
-        # Step 5: Execute via PRIVATE connector
-        # The connector verifies the capability signature
+        # Step 5: execute via private connector
         try:
             raw_data = self._connector.execute(capability)
-        except CapabilityVerificationError as e:
-            # Signature verification failed
-            policy_decision = PolicyDecision(
-                decision=Decision.DENY,
-                reasons=[f"Capability verification failed: {str(e)}"],
-                policy_version=self.policy_engine.get_policy_version(),
-            )
-            return self._create_denied_request(request, policy_decision)
-        except Exception as e:
-            # Fail closed: execution errors mean no data returned
-            policy_decision = PolicyDecision(
-                decision=Decision.DENY,
-                reasons=[f"Execution failed: {str(e)}"],
-                policy_version=self.policy_engine.get_policy_version(),
-            )
-            return self._create_denied_request(request, policy_decision)
+        except CapabilityVerificationError as exc:
+            return self._denied(request, [f"Capability verification failed: {exc}"])
+        except Exception as exc:
+            return self._denied(request, [f"Execution failed: {exc}"])
 
-        # Step 6: Validate result
-        # Convert capability to ExecutionPlan for validation
+        # Step 6: result validation
         execution_plan = self._capability_to_plan(capability)
         execution_result = self.validator.validate(execution_plan, raw_data)
-
         if not execution_result.verified:
-            # Fail closed: validation failures mean result is rejected
-            policy_decision = PolicyDecision(
-                decision=Decision.DENY,
-                reasons=execution_result.verification_errors,
-                policy_version=self.policy_engine.get_policy_version(),
-            )
-            return self._create_denied_request(request, policy_decision)
+            return self._denied(request, execution_result.verification_errors)
 
-        # Step 7: Generate evidence
+        # Step 7: evidence
         evidence = Evidence.create_allowed(request, execution_plan, execution_result)
         audit_event = AuditEvent.from_evidence(evidence)
 
-        # Step 8: Return allowed request
         return AllowedRequest(
             request_id=request.request_id,
             actor=actor,
@@ -396,176 +366,74 @@ class DataFenceBoundary:
             audit_event=audit_event,
         )
 
-    def _evaluate_policy(self, request: Request) -> PolicyDecision:
-        """
-        Evaluate policy for the request.
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-        Supports both the old SimplePolicyEngine (returns types.PolicyDecision)
-        and the new DataFencePolicyEngine (returns policy.PolicyDecision).
-        The result is normalised into a types.PolicyDecision for the rest of
-        the boundary pipeline.
-        """
-        actor = request.actor
-        intent = request.intent
-        requested_fields = intent.fields or []
-
-        raw_decision = self.policy_engine.evaluate(
-            actor=actor,
-            resource=intent.resource,
-            operation=intent.operation,
-            requested_fields=requested_fields,
-        )
-
-        # ── New DataFencePolicyEngine returns policy.PolicyDecision ──────────
-        # It has .effect (PolicyEffect) and .is_allow / .is_deny properties.
+    @staticmethod
+    def _is_deny(raw_decision: Any) -> bool:
+        """Return True if raw_decision is a denial, regardless of engine type."""
         if hasattr(raw_decision, 'effect'):
             from datafence.core.policy import PolicyEffect
-            if raw_decision.effect == PolicyEffect.DENY:
-                return PolicyDecision(
-                    decision=Decision.DENY,
-                    reasons=list(raw_decision.reasons),
-                    policy_version=raw_decision.policy_version,
-                )
-            # ALLOW — carry forward matched_rules as matched_policies
-            return PolicyDecision(
-                decision=Decision.ALLOW,
-                reasons=[],
-                policy_version=raw_decision.policy_version,
-                matched_policies=list(raw_decision.matched_rules),
-            )
+            return raw_decision.effect == PolicyEffect.DENY
+        # Legacy SimplePolicyEngine
+        return raw_decision.decision == Decision.DENY
 
-        # ── Legacy SimplePolicyEngine returns types.PolicyDecision ───────────
-        return raw_decision
+    @staticmethod
+    def _reasons(raw_decision: Any) -> list[str]:
+        """Extract denial reasons from any decision type."""
+        return list(raw_decision.reasons)
 
-    def _create_execution_plan(
-        self,
-        request: Request,
-        policy_decision: PolicyDecision,
-    ) -> ExecutionPlan:
+    def _denied(self, request: Request, reasons: list[str]) -> DeniedRequest:
+        """Build a DeniedRequest with evidence."""
+        try:
+            policy_version = self.policy_engine.get_policy_version()
+        except Exception:
+            policy_version = "unknown"
+        pd = PolicyDecision(
+            decision=Decision.DENY,
+            reasons=reasons,
+            policy_version=policy_version,
+        )
+        evidence = Evidence.create_denied(request, pd)
+        return DeniedRequest(
+            request_id=request.request_id,
+            actor=request.actor,
+            resource=request.intent.resource,
+            operation=request.intent.operation,
+            decision=pd,
+            evidence=evidence,
+            audit_event=AuditEvent.from_evidence(evidence),
+        )
+
+    def _build_capability(self, request: Request, raw_decision: Any) -> AuthorizedExecution:
         """
-        Create an ExecutionPlan from an allowed request.
-        
-        The ExecutionPlan specifies EXACTLY what DataFence authorizes.
-        
-        CRITICAL: The plan may differ from what the LLM requested.
-        - Fields may be restricted
-        - Filters may be added (e.g., tenant_id)
-        - Limits may be enforced
-        
-        The database executes THIS, not the LLM's request.
-        """
-        actor = request.actor
-        intent = request.intent
+        Build a signed AuthorizedExecution from a policy decision.
 
-        # Get allowed fields (policy may restrict what LLM requested)
-        allowed_fields = self.policy_engine.get_allowed_fields(
-            actor=actor,
-            resource=intent.resource,
-        )
+        This is the ONLY place AuthorizedExecution is created.
+        It consumes the exact raw_decision returned by the policy engine —
+        no second evaluation, no compatibility shim.
 
-        # If LLM requested specific fields, intersect with allowed
-        if intent.fields:
-            selected_fields = [f for f in intent.fields if f in allowed_fields]
-        else:
-            selected_fields = allowed_fields
-
-        if not selected_fields:
-            raise ValueError("No authorized fields available")
-
-        # Get enforced filters (e.g., tenant_id)
-        enforced_filters = self.policy_engine.get_enforced_filters(
-            actor=actor,
-            resource=intent.resource,
-        )
-
-        # Apply actor context to filters (e.g., tenant_id = actor.tenant_id)
-        resolved_filters = {}
-        for key, value in enforced_filters.items():
-            if value == ":actor_tenant_id":
-                resolved_filters[key] = actor.tenant_id
-            elif value == ":actor_id":
-                resolved_filters[key] = actor.id
-            else:
-                resolved_filters[key] = value
-
-        # SECURITY INVARIANT: Policy filters win — user cannot widen scope.
-        # Only add user EQ filters on fields the policy has not constrained.
-        for key, value in intent.filters.items():
-            if key not in resolved_filters:
-                resolved_filters[key] = value
-
-        # Get limit
-        max_limit = self.policy_engine.get_max_limit(
-            actor=actor,
-            resource=intent.resource,
-        )
-        limit = min(intent.limit or max_limit, max_limit)
-
-        # Create ExecutionPlan
-        plan = ExecutionPlan.create(
-            actor=actor,
-            resource=intent.resource,
-            operation=intent.operation,
-            selected_fields=selected_fields,
-            enforced_filters=resolved_filters,
-            limit=limit,
-            policy_version=self.policy_engine.get_policy_version(),
-            policy_decisions=policy_decision.matched_policies,
-        )
-
-        return plan
-
-    def _create_signed_capability(
-        self,
-        request: Request,
-        policy_decision: PolicyDecision,
-    ) -> AuthorizedExecution:
-        """
-        Create a cryptographically signed capability.
-
-        Supports both old SimplePolicyEngine and new DataFencePolicyEngine.
-
-        With the NEW engine: allowed_fields, enforced_filter (resolved), and
-        row_limit come directly from the PolicyDecision produced by
-        DataFencePolicyEngine.evaluate().  The boundary no longer needs to
-        call get_allowed_fields / get_enforced_filters / get_max_limit separately.
-
-        With the OLD engine: falls back to calling those helper methods.
+        Supports both DataFencePolicyEngine (new) and SimplePolicyEngine (legacy).
         """
         actor = request.actor
         intent = request.intent
-
-        # ── Try to use new PolicyDecision from DataFencePolicyEngine ─────────
-        # The raw_decision is cached in the engine; we re-evaluate to get it.
-        raw_decision = self.policy_engine.evaluate(
-            actor=actor,
-            resource=intent.resource,
-            operation=intent.operation,
-            requested_fields=intent.fields or [],
-        )
 
         if hasattr(raw_decision, 'effect'):
-            # New engine — decision carries all we need
+            # ── DataFencePolicyEngine path ────────────────────────────────────
             allowed_fields_list = list(raw_decision.allowed_fields)
-
-            # Intersect with requested fields if specified
             if intent.fields:
                 selected_fields = [f for f in intent.fields if f in allowed_fields_list]
             else:
                 selected_fields = allowed_fields_list
 
             if not selected_fields:
-                raise ValueError("No authorized fields available")
+                raise ValueError("No authorized fields available after policy evaluation")
 
-            # enforced_filter is already resolved (actor refs replaced with values)
+            # enforced_filter already has actor refs resolved by the policy engine
             resolved_filters = raw_decision.enforced_filter.to_dict()
 
-            # Add intent filters that don't conflict with policy filters.
-            # SECURITY INVARIANT: User predicates can NARROW an authorized scope,
-            # never widen it.  Policy-injected filters always take precedence.
-            # We only add user-supplied EQ predicates on fields the policy has
-            # not already constrained — we never allow OR expressions or NEQ on
-            # policy-controlled fields.
+            # SECURITY INVARIANT: Policy filters win — user can only narrow scope
             for key, value in intent.filters.items():
                 if key not in resolved_filters:
                     resolved_filters[key] = value
@@ -575,27 +443,21 @@ class DataFenceBoundary:
                 limit = min(intent.limit, limit)
 
             policy_version = raw_decision.policy_version
+            matched = list(raw_decision.matched_rules)
 
         else:
-            # Old engine — call helper methods
+            # ── SimplePolicyEngine path (legacy) ──────────────────────────────
             allowed_fields = self.policy_engine.get_allowed_fields(
-                actor=actor,
-                resource=intent.resource,
-            )
-
+                actor=actor, resource=intent.resource)
             if intent.fields:
                 selected_fields = [f for f in intent.fields if f in allowed_fields]
             else:
                 selected_fields = allowed_fields
-
             if not selected_fields:
                 raise ValueError("No authorized fields available")
 
             enforced_filters = self.policy_engine.get_enforced_filters(
-                actor=actor,
-                resource=intent.resource,
-            )
-
+                actor=actor, resource=intent.resource)
             resolved_filters = {}
             for key, value in enforced_filters.items():
                 if value == ":actor_tenant_id":
@@ -604,20 +466,17 @@ class DataFenceBoundary:
                     resolved_filters[key] = actor.id
                 else:
                     resolved_filters[key] = value
-
             for key, value in intent.filters.items():
                 if key not in resolved_filters:
                     resolved_filters[key] = value
 
             max_limit = self.policy_engine.get_max_limit(
-                actor=actor,
-                resource=intent.resource,
-            )
+                actor=actor, resource=intent.resource)
             limit = min(intent.limit or max_limit, max_limit)
             policy_version = self.policy_engine.get_policy_version()
+            matched = list(getattr(raw_decision, 'matched_policies', []))
 
-        # Build signed capability
-        capability = AuthorizedExecution.create_signed(
+        return AuthorizedExecution.create_signed(
             execution_id=f"exec_{uuid4().hex[:16]}",
             actor=actor,
             resource=intent.resource,
@@ -626,12 +485,10 @@ class DataFenceBoundary:
             enforced_filters=resolved_filters,
             limit=limit,
             policy_version=policy_version,
-            policy_decisions=list(policy_decision.matched_policies),
+            policy_decisions=matched,
             signing_key=self._signing_key,
         )
 
-        return capability
-    
     def _capability_to_plan(self, capability: AuthorizedExecution) -> ExecutionPlan:
         """
         Convert AuthorizedExecution to ExecutionPlan.
@@ -648,23 +505,4 @@ class DataFenceBoundary:
             limit=capability.limit,
             policy_version=capability.policy_version,
             policy_decisions=capability.policy_decisions,
-        )
-
-    def _create_denied_request(
-        self,
-        request: Request,
-        policy_decision: PolicyDecision,
-    ) -> DeniedRequest:
-        """Create a denied request with evidence."""
-        evidence = Evidence.create_denied(request, policy_decision)
-        audit_event = AuditEvent.from_evidence(evidence)
-
-        return DeniedRequest(
-            request_id=request.request_id,
-            actor=request.actor,
-            resource=request.intent.resource,
-            operation=request.intent.operation,
-            decision=policy_decision,
-            evidence=evidence,
-            audit_event=audit_event,
         )
