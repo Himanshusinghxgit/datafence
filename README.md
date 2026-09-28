@@ -230,8 +230,8 @@ python demos/killer_demo.py
 
 | Version | Focus |
 |---------|-------|
-| **v0.5.0** ✅ | Typed IR, new policy engine, registry, new connectors |
-| v0.5.1 | Architecture freeze, PostgreSQL integration tests |
+| **v0.5.3** ✅ | Single policy interface, compat shim removed, 15 security invariants |
+| v0.6.0 | Resource Registry in boundary, PostgreSQL integration tests |
 | v0.6.0 | Resource Registry in all connectors, policy semantics formalization |
 | v0.7.0 | PostgreSQL production hardening + CI integration tests |
 | v0.8.0 | Athena / Snowflake production hardening |
@@ -273,6 +273,6 @@ Apache 2.0
 
 ---
 
-**Version:** 0.5.0  
-**Status:** Prototype (Architecture stabilizing)  
-**Next:** v0.5.1 — Architecture freeze + PostgreSQL integration tests
+**Version:** 0.5.3  
+**Status:** Prototype (Architecture stable)  
+**Next:** v0.6.0 — Resource Registry integration, PostgreSQL integration tests

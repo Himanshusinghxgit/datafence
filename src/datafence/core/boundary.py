@@ -42,10 +42,21 @@ from datafence.core.capability import AuthorizedExecution, CapabilityVerificatio
 
 class PolicyEngine(Protocol):
     """
-    Policy engine interface.
-    
-    Evaluates whether a request is allowed.
-    Returns what fields, filters, and operations are authorized.
+    Policy engine interface (v0.5).
+
+    Contract: evaluate() returns a datafence.core.policy.PolicyDecision.
+    That single object carries everything needed to build a capability:
+        - effect (ALLOW/DENY)
+        - allowed_fields
+        - enforced_filter (resolved, no actor refs)
+        - row_limit
+        - policy_version
+        - matched_rules
+        - obligations
+
+    There is no separate get_allowed_fields() / get_enforced_filters() /
+    get_max_limit() / get_policy_version() contract.  Those were the legacy
+    SimplePolicyEngine helpers and are no longer part of this interface.
     """
 
     def evaluate(
@@ -54,36 +65,19 @@ class PolicyEngine(Protocol):
         resource: str,
         operation: Operation,
         requested_fields: list[str],
-    ) -> PolicyDecision:
-        """Evaluate policy for a request."""
-        ...
+    ) -> Any:
+        """
+        Evaluate policy for a request.
 
-    def get_allowed_fields(
-        self,
-        actor: Actor,
-        resource: str,
-    ) -> list[str]:
-        """Get fields the actor is allowed to access."""
-        ...
-
-    def get_enforced_filters(
-        self,
-        actor: Actor,
-        resource: str,
-    ) -> dict[str, str]:
-        """Get filters that must be enforced (e.g., tenant_id)."""
-        ...
-
-    def get_max_limit(
-        self,
-        actor: Actor,
-        resource: str,
-    ) -> int:
-        """Get maximum number of rows allowed."""
+        Must return a datafence.core.policy.PolicyDecision with:
+            .effect       — PolicyEffect.ALLOW or PolicyEffect.DENY
+            .reasons      — tuple of strings (populated on DENY)
+            .allowed_fields, .enforced_filter, .row_limit, .policy_version
+        """
         ...
 
     def get_policy_version(self) -> str:
-        """Get policy version for provenance."""
+        """Return the policy version string (used in Evidence/audit)."""
         ...
 
 
@@ -372,16 +366,13 @@ class DataFenceBoundary:
 
     @staticmethod
     def _is_deny(raw_decision: Any) -> bool:
-        """Return True if raw_decision is a denial, regardless of engine type."""
-        if hasattr(raw_decision, 'effect'):
-            from datafence.core.policy import PolicyEffect
-            return raw_decision.effect == PolicyEffect.DENY
-        # Legacy SimplePolicyEngine
-        return raw_decision.decision == Decision.DENY
+        """Return True if raw_decision is a denial."""
+        from datafence.core.policy import PolicyEffect
+        return raw_decision.effect == PolicyEffect.DENY
 
     @staticmethod
     def _reasons(raw_decision: Any) -> list[str]:
-        """Extract denial reasons from any decision type."""
+        """Extract denial reasons from a PolicyDecision."""
         return list(raw_decision.reasons)
 
     def _denied(self, request: Request, reasons: list[str]) -> DeniedRequest:
@@ -408,73 +399,38 @@ class DataFenceBoundary:
 
     def _build_capability(self, request: Request, raw_decision: Any) -> AuthorizedExecution:
         """
-        Build a signed AuthorizedExecution from a policy decision.
+        Build a signed AuthorizedExecution from a DataFencePolicyDecision.
 
         This is the ONLY place AuthorizedExecution is created.
-        It consumes the exact raw_decision returned by the policy engine —
-        no second evaluation, no compatibility shim.
+        The raw_decision is the exact object returned by policy_engine.evaluate()
+        — no re-evaluation, no legacy helper methods.
 
-        Supports both DataFencePolicyEngine (new) and SimplePolicyEngine (legacy).
+        Contract: raw_decision must be a datafence.core.policy.PolicyDecision
+        with .allowed_fields, .enforced_filter, .row_limit, .policy_version.
         """
         actor = request.actor
         intent = request.intent
 
-        if hasattr(raw_decision, 'effect'):
-            # ── DataFencePolicyEngine path ────────────────────────────────────
-            allowed_fields_list = list(raw_decision.allowed_fields)
-            if intent.fields:
-                selected_fields = [f for f in intent.fields if f in allowed_fields_list]
-            else:
-                selected_fields = allowed_fields_list
-
-            if not selected_fields:
-                raise ValueError("No authorized fields available after policy evaluation")
-
-            # enforced_filter already has actor refs resolved by the policy engine
-            resolved_filters = raw_decision.enforced_filter.to_dict()
-
-            # SECURITY INVARIANT: Policy filters win — user can only narrow scope
-            for key, value in intent.filters.items():
-                if key not in resolved_filters:
-                    resolved_filters[key] = value
-
-            limit = raw_decision.row_limit.value
-            if intent.limit:
-                limit = min(intent.limit, limit)
-
-            policy_version = raw_decision.policy_version
-            matched = list(raw_decision.matched_rules)
-
+        allowed_fields_list = list(raw_decision.allowed_fields)
+        if intent.fields:
+            selected_fields = [f for f in intent.fields if f in allowed_fields_list]
         else:
-            # ── SimplePolicyEngine path (legacy) ──────────────────────────────
-            allowed_fields = self.policy_engine.get_allowed_fields(
-                actor=actor, resource=intent.resource)
-            if intent.fields:
-                selected_fields = [f for f in intent.fields if f in allowed_fields]
-            else:
-                selected_fields = allowed_fields
-            if not selected_fields:
-                raise ValueError("No authorized fields available")
+            selected_fields = allowed_fields_list
 
-            enforced_filters = self.policy_engine.get_enforced_filters(
-                actor=actor, resource=intent.resource)
-            resolved_filters = {}
-            for key, value in enforced_filters.items():
-                if value == ":actor_tenant_id":
-                    resolved_filters[key] = actor.tenant_id
-                elif value == ":actor_id":
-                    resolved_filters[key] = actor.id
-                else:
-                    resolved_filters[key] = value
-            for key, value in intent.filters.items():
-                if key not in resolved_filters:
-                    resolved_filters[key] = value
+        if not selected_fields:
+            raise ValueError("No authorized fields available after policy evaluation")
 
-            max_limit = self.policy_engine.get_max_limit(
-                actor=actor, resource=intent.resource)
-            limit = min(intent.limit or max_limit, max_limit)
-            policy_version = self.policy_engine.get_policy_version()
-            matched = list(getattr(raw_decision, 'matched_policies', []))
+        # enforced_filter already has actor refs resolved by the policy engine
+        resolved_filters = raw_decision.enforced_filter.to_dict()
+
+        # SECURITY INVARIANT: Policy filters win — user can only narrow scope
+        for key, value in intent.filters.items():
+            if key not in resolved_filters:
+                resolved_filters[key] = value
+
+        limit = raw_decision.row_limit.value
+        if intent.limit:
+            limit = min(intent.limit, limit)
 
         return AuthorizedExecution.create_signed(
             execution_id=f"exec_{uuid4().hex[:16]}",
@@ -484,8 +440,8 @@ class DataFenceBoundary:
             selected_fields=selected_fields,
             enforced_filters=resolved_filters,
             limit=limit,
-            policy_version=policy_version,
-            policy_decisions=matched,
+            policy_version=raw_decision.policy_version,
+            policy_decisions=list(raw_decision.matched_rules),
             signing_key=self._signing_key,
         )
 

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from datafence.connectors.sqlite_connector import SQLiteConnector, create_demo_database
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.policy_engine import create_banking_demo_policy
+from datafence.core.policy import create_banking_policy as create_banking_demo_policy
 from datafence.core.types import Actor, Intent, Operation
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 from datetime import datetime

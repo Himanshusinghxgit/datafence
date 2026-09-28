@@ -22,7 +22,7 @@ from secrets import token_bytes
 
 from datafence.connectors.sqlite_connector import SQLiteConnector, create_demo_database
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.policy_engine import create_banking_demo_policy
+from datafence.core.policy import create_banking_policy as create_banking_demo_policy
 from datafence.core.types import Actor, Intent, Operation, DeniedRequest
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 
