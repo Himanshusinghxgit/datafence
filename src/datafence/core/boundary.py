@@ -90,6 +90,7 @@ class Connector(Protocol):
     
     CRITICAL CHANGES:
     - Connector accepts AuthorizedExecution (signed capability)
+    - Connector receives signing_key at construction (NEVER through execute)
     - Connector verifies HMAC signature before execution
     - Connector is PRIVATE (not exported in public API)
     
@@ -98,16 +99,12 @@ class Connector(Protocol):
     not the LLM's untrusted request.
     """
 
-    def execute_capability(
-        self,
-        capability: AuthorizedExecution,
-        signing_key: bytes,
-    ) -> list[dict[str, str]]:
+    def execute(self, capability: AuthorizedExecution) -> list[dict[str, str]]:
         """
         Execute a signed capability.
         
         The connector MUST:
-        1. Verify capability signature with signing_key
+        1. Verify capability signature (uses signing_key from __init__)
         2. Reject invalid/forged capabilities
         3. Generate SQL from the capability internally
         4. Use prepared statements
@@ -115,23 +112,12 @@ class Connector(Protocol):
         
         Args:
             capability: Signed AuthorizedExecution
-            signing_key: Secret key for signature verification
         
         Returns:
             Query results
         
         Raises:
             CapabilityVerificationError: If signature is invalid
-        """
-        ...
-    
-    # Legacy method for backward compatibility (deprecated)
-    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, str]]:
-        """
-        DEPRECATED: Use execute_capability() instead.
-        
-        This method is kept for backward compatibility with v0.3 demos.
-        It does NOT provide cryptographic verification.
         """
         ...
 
@@ -214,14 +200,74 @@ class DataFenceBoundary:
         policy_engine: PolicyEngine,
         connector: Connector,
     ):
+        """
+        Initialize DataFence boundary.
+        
+        Args:
+            policy_engine: Policy evaluation engine
+            connector: Data connector (must support signature verification)
+        
+        SECURITY:
+        - Generates 32-byte signing key for HMAC
+        - Key is kept private within boundary
+        - Connector must have been constructed with same key
+        
+        IMPORTANT: Use create() factory method instead of direct construction.
+        This ensures connector and boundary share the signing key properly.
+        """
         self.policy_engine = policy_engine
         self._connector = connector  # PRIVATE - not accessible externally
         self.validator = ResultValidator()
         
-        # Generate secret signing key (32 bytes = 256 bits)
-        # This key is used to sign capabilities with HMAC-SHA256
-        # CRITICAL: Keep this private - do not expose via public API
-        self._signing_key = token_bytes(32)
+        # NOTE: Signing key should have been set by create() factory
+        # This is here for backward compatibility but will be refactored
+        if not hasattr(self, '_signing_key'):
+            self._signing_key = token_bytes(32)
+    
+    @classmethod
+    def create(
+        cls,
+        policy_engine: PolicyEngine,
+        connector_factory: callable,
+        **connector_kwargs
+    ) -> "DataFenceBoundary":
+        """
+        Create DataFenceBoundary with properly configured connector.
+        
+        This is the RECOMMENDED way to create a boundary.
+        
+        Args:
+            policy_engine: Policy evaluation engine
+            connector_factory: Connector class (e.g., SQLiteConnector)
+            **connector_kwargs: Arguments for connector (e.g., database_path)
+        
+        Returns:
+            Configured DataFenceBoundary
+        
+        Example:
+            boundary = DataFenceBoundary.create(
+                policy_engine=policy_engine,
+                connector_factory=SQLiteConnector,
+                database_path="/path/to/db.sqlite"
+            )
+        
+        SECURITY:
+        - Generates signing key once
+        - Passes key to connector at construction
+        - Connector and boundary share same key
+        - Key never exposed through public API
+        """
+        # Generate signing key
+        signing_key = token_bytes(32)
+        
+        # Create connector with signing key
+        connector = connector_factory(signing_key=signing_key, **connector_kwargs)
+        
+        # Create boundary
+        boundary = cls(policy_engine, connector)
+        boundary._signing_key = signing_key
+        
+        return boundary
 
     def execute(
         self,
@@ -282,10 +328,7 @@ class DataFenceBoundary:
         # Step 5: Execute via PRIVATE connector
         # The connector verifies the capability signature
         try:
-            raw_data = self._connector.execute_capability(
-                capability,
-                self._signing_key,
-            )
+            raw_data = self._connector.execute(capability)
         except CapabilityVerificationError as e:
             # Signature verification failed
             policy_decision = PolicyDecision(

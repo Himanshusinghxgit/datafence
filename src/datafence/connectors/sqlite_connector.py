@@ -37,23 +37,35 @@ class SQLiteConnector:
     5. Returns ONLY the fields in the capability
     
     SECURITY:
+    - Signing key is received at construction (NEVER passed through public API)
     - Capability signature is verified BEFORE execution
     - Invalid signature = SecurityError (no data returned)
-    - Legacy execute_plan() is kept but does NOT verify signatures
+    
+    IMPORTANT: This connector is INTERNAL to DataFenceBoundary.
+    It should NOT be instantiated directly by application code.
     """
 
-    def __init__(self, database_path: str):
+    def __init__(self, database_path: str, signing_key: bytes):
+        """
+        Initialize SQLite connector.
+        
+        Args:
+            database_path: Path to SQLite database
+            signing_key: Secret key for capability verification (32 bytes)
+        
+        SECURITY: The signing_key should come from DataFenceBoundary.
+        The application should never handle or see this key.
+        """
         self.database_path = database_path
+        self._signing_key = signing_key  # PRIVATE - never expose
         self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = sqlite3.Row  # Return rows as dicts
 
-    def execute_capability(
-        self,
-        capability: AuthorizedExecution,
-        signing_key: bytes,
-    ) -> list[dict[str, Any]]:
+    def execute(self, capability: AuthorizedExecution) -> list[dict[str, Any]]:
         """
         Execute a signed capability (v0.4 - Hardened).
+        
+        This is the ONLY execution method. No execute_plan(), no execute_sql().
         
         SECURITY:
         - Verifies HMAC signature before execution
@@ -65,7 +77,6 @@ class SQLiteConnector:
         
         Args:
             capability: Signed AuthorizedExecution
-            signing_key: Secret key for signature verification
         
         Returns:
             Query results
@@ -74,7 +85,7 @@ class SQLiteConnector:
             CapabilityVerificationError: If signature is invalid
         """
         # SECURITY CHECK: Verify cryptographic signature
-        if not capability.verify_signature(signing_key):
+        if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
                 f"Invalid capability signature for execution {capability.execution_id}. "
                 "The capability may be forged or tampered with."
@@ -97,43 +108,6 @@ class SQLiteConnector:
             filtered_row = {
                 field: row[field]
                 for field in capability.selected_fields
-                if field in row.keys()
-            }
-            results.append(filtered_row)
-
-        return results
-
-    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, Any]]:
-        """
-        Execute an ExecutionPlan (v0.3 - DEPRECATED).
-        
-        DEPRECATED: This method is kept for backward compatibility with v0.3.
-        It does NOT verify cryptographic signatures and should NOT be used.
-        
-        Use execute_capability() instead.
-        
-        SECURITY WARNING:
-        - This method does NOT verify signatures
-        - Vulnerable to ExecutionPlan forgery
-        - Kept only for v0.3 compatibility
-        """
-        # Generate SQL from ExecutionPlan
-        sql, params = self._generate_sql(plan)
-
-        # Execute with prepared statement
-        cursor = self.connection.cursor()
-        cursor.execute(sql, params)
-
-        # Fetch results
-        rows = cursor.fetchall()
-
-        # Convert to list of dicts, ensuring ONLY authorized fields
-        results = []
-        for row in rows:
-            # Only include fields from the plan
-            filtered_row = {
-                field: row[field]
-                for field in plan.selected_fields
                 if field in row.keys()
             }
             results.append(filtered_row)
@@ -198,60 +172,6 @@ class SQLiteConnector:
 
         return sql, params
 
-    def _generate_sql(self, plan: ExecutionPlan) -> tuple[str, dict[str, Any]]:
-        """
-        Generate SQL from ExecutionPlan.
-        
-        The SQL is constructed from the plan, NOT from LLM input.
-        
-        Returns:
-            (sql_string, parameters)
-        """
-        if plan.operation == Operation.READ:
-            return self._generate_select(plan)
-        elif plan.operation == Operation.INSERT:
-            raise NotImplementedError("INSERT not implemented in demo")
-        elif plan.operation == Operation.UPDATE:
-            raise NotImplementedError("UPDATE not implemented in demo")
-        elif plan.operation == Operation.DELETE:
-            raise NotImplementedError("DELETE not implemented in demo")
-        else:
-            raise ValueError(f"Unknown operation: {plan.operation}")
-
-    def _generate_select(self, plan: ExecutionPlan) -> tuple[str, dict[str, Any]]:
-        """
-        Generate SELECT statement from ExecutionPlan.
-        
-        The LLM may have requested:
-            SELECT * FROM transactions
-        
-        But DataFence generates:
-            SELECT id, merchant, amount, timestamp
-            FROM transactions
-            WHERE tenant_id = :tenant_id
-            LIMIT 100
-        
-        based on the ExecutionPlan.
-        """
-        # SELECT clause - ONLY authorized fields
-        fields = ", ".join(plan.selected_fields)
-        sql = f"SELECT {fields} FROM {plan.resource}"
-
-        # WHERE clause - enforced filters
-        params = {}
-        if plan.enforced_filters:
-            conditions = []
-            for i, (key, value) in enumerate(plan.enforced_filters.items()):
-                param_name = f"filter_{i}"
-                conditions.append(f"{key} = :{param_name}")
-                params[param_name] = value
-
-            sql += " WHERE " + " AND ".join(conditions)
-
-        # LIMIT clause - enforced limit
-        sql += f" LIMIT {plan.limit}"
-
-        return sql, params
 
     def close(self):
         """Close database connection."""
@@ -271,16 +191,22 @@ class MaliciousConnector(SQLiteConnector):
     
     This connector attempts to return unauthorized fields.
     DataFence's result validation MUST catch this.
+    
+    NOTE: This is for TESTING ONLY. In v0.4, it bypasses signature
+    verification to test result validation.
     """
 
-    def execute_plan(self, plan: ExecutionPlan) -> list[dict[str, Any]]:
+    def execute(self, capability: AuthorizedExecution) -> list[dict[str, Any]]:
         """
-        Execute plan but attempt to return unauthorized fields.
+        Execute capability but attempt to return unauthorized fields.
         
         This tests whether DataFence's result validation works.
+        
+        IMPORTANT: For testing, we skip signature verification
+        to isolate the result validation test.
         """
-        # Execute normally
-        sql, params = self._generate_sql(plan)
+        # Generate SQL (skip signature verification for this test)
+        sql, params = self._generate_sql_from_capability(capability)
         cursor = self.connection.cursor()
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -297,9 +223,16 @@ class MaliciousConnector(SQLiteConnector):
         return results
 
 
-def create_demo_database(database_path: str) -> SQLiteConnector:
+def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnector:
     """
     Create the demo database for the killer demo.
+    
+    Args:
+        database_path: Path to SQLite database file
+        signing_key: Signing key for capability verification (32 bytes)
+    
+    Returns:
+        Configured SQLiteConnector
     
     Schema:
     - customers (id, tenant_id, name, email, ssn, account_number)
@@ -399,4 +332,4 @@ def create_demo_database(database_path: str) -> SQLiteConnector:
     conn.commit()
     conn.close()
 
-    return SQLiteConnector(database_path)
+    return SQLiteConnector(database_path, signing_key)
