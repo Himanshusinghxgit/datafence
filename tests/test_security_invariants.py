@@ -67,9 +67,11 @@ def db_path():
 
 @pytest.fixture
 def boundary(db_path):
+    policy_engine = create_banking_policy()
     b = DataFenceBoundary.create(
-        policy_engine=create_banking_policy(),
+        policy_engine=policy_engine,
         connector_factory=SQLiteConnector,
+        registry=policy_engine.registry,
         database_path=db_path,
     )
     create_demo_database(db_path, b._signing_key)
@@ -244,7 +246,12 @@ def test_result_validation_blocks_rogue_connector(db_path):
     create_demo_database(db_path, key)
     malicious = MaliciousConnector(db_path, key)
     engine = create_banking_policy()
-    boundary = DataFenceBoundary(policy_engine=engine, connector=malicious, signing_key=key)
+    boundary = DataFenceBoundary(
+        policy_engine=engine,
+        connector=malicious,
+        signing_key=key,
+        registry=engine.registry,
+    )
 
     actor = Actor(id="u", tenant_id="tenant_a")
     intent = Intent(resource="transactions", operation=Operation.READ,
@@ -318,7 +325,7 @@ def test_policy_evaluated_exactly_once(db_path):
     b = DataFenceBoundary.create(
         policy_engine=engine,
         connector_factory=SQLiteConnector,
-        registry=base_engine._registry,
+        registry=base_engine.registry,
         database_path=db_path,
     )
     create_demo_database(db_path, b._signing_key)
@@ -400,9 +407,11 @@ def test_signing_key_not_in_public_api():
 
 def test_boundary_create_does_not_return_signing_key(db_path):
     """DataFenceBoundary.create() returns a boundary, not the key."""
+    policy_engine = create_banking_policy()
     b = DataFenceBoundary.create(
-        policy_engine=create_banking_policy(),
+        policy_engine=policy_engine,
         connector_factory=SQLiteConnector,
+        registry=policy_engine.registry,
         database_path=db_path,
     )
     # The return value is a boundary object, not a tuple/dict with the key

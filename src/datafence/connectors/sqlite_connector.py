@@ -1,5 +1,5 @@
 """
-SQLite connector for DataFence (v0.5 - typed IR, safe identifier compilation).
+SQLite connector for DataFence (v1.0 - typed IR, safe identifier compilation).
 
 CRITICAL SECURITY PROPERTIES:
     - Connector verifies cryptographic signature before execution
@@ -34,7 +34,7 @@ from datafence.core.types import Operation
 
 class SQLiteConnector:
     """
-    SQLite connector with cryptographic capability verification (v0.5).
+    SQLite connector with cryptographic capability verification (v1.0).
 
     The connector:
     1. Verifies HMAC signature on AuthorizedExecution — rejects forgeries.
@@ -83,6 +83,10 @@ class SQLiteConnector:
                 f"Invalid capability signature for execution "
                 f"{capability.execution_id!r}. "
                 "The capability may be forged or tampered with."
+            )
+        if capability.is_expired():
+            raise CapabilityVerificationError(
+                f"Expired capability for execution {capability.execution_id!r}"
             )
 
         # 2. Compile SQL from verified capability

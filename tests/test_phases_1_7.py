@@ -93,6 +93,7 @@ def boundary(banking_engine, db_path):
     b = DataFenceBoundary.create(
         policy_engine=banking_engine,
         connector_factory=SQLiteConnector,
+        registry=banking_engine.registry,
         database_path=db_path,
     )
     create_demo_database(db_path, b._signing_key)
@@ -546,6 +547,7 @@ class TestPolicyIntegrationWithBoundary:
         b = DataFenceBoundary.create(
             policy_engine=engine,
             connector_factory=SQLiteConnector,
+            registry=engine.registry,
             database_path=db_path,
         )
         create_demo_database(db_path, b._signing_key)
@@ -561,6 +563,7 @@ class TestPolicyIntegrationWithBoundary:
         b = DataFenceBoundary.create(
             policy_engine=engine,
             connector_factory=SQLiteConnector,
+            registry=engine.registry,
             database_path=db_path,
         )
         create_demo_database(db_path, b._signing_key)
@@ -584,6 +587,7 @@ class TestPolicyIntegrationWithBoundary:
         b = DataFenceBoundary.create(
             policy_engine=engine,
             connector_factory=SQLiteConnector,
+            registry=engine.registry,
             database_path=db_path,
         )
         create_demo_database(db_path, b._signing_key)
@@ -598,6 +602,7 @@ class TestPolicyIntegrationWithBoundary:
         b = DataFenceBoundary.create(
             policy_engine=engine,
             connector_factory=SQLiteConnector,
+            registry=engine.registry,
             database_path=db_path,
         )
         create_demo_database(db_path, b._signing_key)

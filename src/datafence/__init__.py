@@ -3,10 +3,10 @@ DataFence — Policy-Enforced Data Execution for AI.
 
 The core principle: The model proposes. DataFence decides.
 
-Version 0.6.0 — Unified capability boundary with Resource Registry
+Version 1.0.0 — Capability-gated authorization and execution boundary
 ------------------------------------------
 All legacy v0.1–v0.4 code has been moved to datafence._legacy/.
-The public API exposes only the v0.5 capability-based architecture.
+The public API exposes only the v1.0 capability-based architecture.
 
 Single execution path:
     Intent (untrusted)
@@ -25,9 +25,11 @@ Quick start::
     from datafence import create_banking_policy
     from datafence.connectors.sqlite_connector import create_demo_database
 
+    policy_engine = create_banking_policy()
     boundary = DataFenceBoundary.create(
-        policy_engine=create_banking_policy(),
+        policy_engine=policy_engine,
         connector_factory=create_demo_database,
+        registry=policy_engine.registry,
         database_path="data.db",
     )
 
@@ -75,7 +77,7 @@ from datafence.core.resources import (
 )
 
 # ---------------------------------------------------------------------------
-# Policy engine (v0.5)
+# Policy engine (v1.0)
 # ---------------------------------------------------------------------------
 from datafence.core.policy import (
     ActionDecision,
@@ -119,7 +121,7 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "0.6.0"
+__version__ = "1.0.0"
 
 __all__ = [
     # ── Core ─────────────────────────────────────────────────────────────

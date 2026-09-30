@@ -1,5 +1,5 @@
 """
-DataFence Security Boundary (v0.5 - Unified Architecture).
+DataFence Security Boundary (v0.6 - Contract-Frozen Architecture).
 
 This is the core enforcement layer with cryptographic capabilities.
 
@@ -21,6 +21,7 @@ The connector verifies the signature before execution.
 
 from typing import Any, Protocol, Union
 from secrets import token_bytes
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 from datafence.core.types import (
@@ -44,7 +45,7 @@ from datafence.core.registry import ResourceRegistry
 
 class PolicyEngine(Protocol):
     """
-    Policy engine interface (v0.5).
+    Policy engine interface (v0.6).
 
     Contract: evaluate() returns a datafence.core.policy.PolicyDecision.
     That single object carries everything needed to build a capability:
@@ -143,6 +144,10 @@ class ResultValidator:
                     f"Result contains unauthorized fields: {unauthorized}"
                 )
                 break
+            missing = allowed_fields - returned_fields
+            if missing:
+                errors.append(f"Result is missing authorized fields: {missing}")
+                break
 
         # Check: Row count within limit
         if len(data) > plan.limit:
@@ -189,6 +194,8 @@ class DataFenceBoundary:
         connector: Connector,
         signing_key: bytes = None,
         registry: ResourceRegistry | None = None,
+        capability_ttl_seconds: int = 300,
+        capability_audience: str = "datafence",
     ):
         """
         Initialize DataFence boundary.
@@ -206,12 +213,21 @@ class DataFenceBoundary:
         - Use create() factory to ensure proper key sharing
         - Direct construction may lead to key mismatch errors
         """
-        effective_registry = registry or getattr(policy_engine, "_registry", None)
-        if effective_registry is None:
+        if registry is None:
             raise ValueError("DataFenceBoundary requires a ResourceRegistry")
+        policy_registry = getattr(policy_engine, "registry", None)
+        if policy_registry is not None and policy_registry is not registry:
+            raise ValueError("Boundary registry must match the policy engine registry")
+        registry.freeze()
+        if capability_ttl_seconds <= 0:
+            raise ValueError("capability_ttl_seconds must be positive")
+        if not capability_audience:
+            raise ValueError("capability_audience cannot be empty")
         self.policy_engine = policy_engine
         self._connector = connector  # PRIVATE - not accessible externally
-        self._registry = effective_registry
+        self._registry = registry
+        self._capability_ttl_seconds = capability_ttl_seconds
+        self._capability_audience = capability_audience
         self.validator = ResultValidator()
         
         # Set or generate signing key
@@ -236,6 +252,8 @@ class DataFenceBoundary:
         policy_engine: PolicyEngine,
         connector_factory: callable,
         registry: ResourceRegistry | None = None,
+        capability_ttl_seconds: int = 300,
+        capability_audience: str = "datafence",
         **connector_kwargs
     ) -> "DataFenceBoundary":
         """
@@ -266,9 +284,16 @@ class DataFenceBoundary:
         - Connector and boundary share same key
         - Key never exposed through public API
         """
-        effective_registry = registry or getattr(policy_engine, "_registry", None)
-        if effective_registry is None:
+        if registry is None:
             raise ValueError("DataFenceBoundary.create() requires a ResourceRegistry")
+        policy_registry = getattr(policy_engine, "registry", None)
+        if policy_registry is not None and policy_registry is not registry:
+            raise ValueError("Boundary registry must match the policy engine registry")
+        registry.freeze()
+        if capability_ttl_seconds <= 0:
+            raise ValueError("capability_ttl_seconds must be positive")
+        if not capability_audience:
+            raise ValueError("capability_audience cannot be empty")
 
         # Generate signing key (32 bytes for HMAC-SHA256)
         signing_key = token_bytes(32)
@@ -282,7 +307,9 @@ class DataFenceBoundary:
         boundary.policy_engine = policy_engine
         boundary._connector = connector
         boundary._signing_key = signing_key
-        boundary._registry = effective_registry
+        boundary._registry = registry
+        boundary._capability_ttl_seconds = capability_ttl_seconds
+        boundary._capability_audience = capability_audience
         boundary.validator = ResultValidator()
         
         return boundary
@@ -293,7 +320,7 @@ class DataFenceBoundary:
         intent: Intent,
     ) -> Union[AllowedRequest, DeniedRequest]:
         """
-        Execute a request through the security boundary (v0.5).
+        Execute a request through the security boundary (v0.6).
 
         Flow:
             1. Normalize request (actor + intent → Request)
@@ -452,6 +479,8 @@ class DataFenceBoundary:
             policy_version=raw_decision.policy_version,
             policy_decisions=list(raw_decision.matched_rules),
             signing_key=self._signing_key,
+            expires_at=datetime.utcnow() + timedelta(seconds=self._capability_ttl_seconds),
+            audience=self._capability_audience,
         )
 
     def _capability_to_plan(self, capability: AuthorizedExecution) -> ExecutionPlan:

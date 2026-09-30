@@ -21,6 +21,7 @@ Usage::
     boundary = DataFenceBoundary.create(
         policy_engine=policy_engine,
         connector_factory=AthenaConnector,
+        registry=policy_engine.registry,
         s3_staging_dir="s3://my-bucket/athena-results/",
         region_name="us-east-1",
         schema_name="my_database",   # Glue catalog database
@@ -82,6 +83,10 @@ class AthenaConnector:
             raise CapabilityVerificationError(
                 f"Invalid capability signature for execution "
                 f"{capability.execution_id!r}."
+            )
+        if capability.is_expired():
+            raise CapabilityVerificationError(
+                f"Expired capability for execution {capability.execution_id!r}"
             )
 
         sql, params = self._compile(capability)

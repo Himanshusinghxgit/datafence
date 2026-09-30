@@ -29,9 +29,11 @@ Usage::
     from datafence.core.policy import create_banking_policy
     from datafence.connectors.sqlite_connector import create_demo_database
 
+    policy_engine = create_banking_policy()
     boundary = DataFenceBoundary.create(
-        policy_engine=create_banking_policy(),
+        policy_engine=policy_engine,
         connector_factory=create_demo_database,
+        registry=policy_engine.registry,
         database_path="/data/banking.db",
     )
     tool = DataFenceOpenAITool(boundary)

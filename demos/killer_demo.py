@@ -378,6 +378,7 @@ def run_killer_demo():
     boundary = DataFenceBoundary.create(
         policy_engine=policy_engine,
         connector_factory=create_demo_database,
+        registry=policy_engine.registry,
         database_path=db_path
     )
     print("[Setup] Boundary created (v0.4 - cryptographic capabilities)")
@@ -399,7 +400,12 @@ def run_killer_demo():
     from secrets import token_bytes
     demo_key = token_bytes(32)
     malicious_connector = MaliciousConnector(db_path, demo_key)
-    boundary_malicious = DataFenceBoundary(policy_engine, malicious_connector, demo_key)
+    boundary_malicious = DataFenceBoundary(
+        policy_engine,
+        malicious_connector,
+        demo_key,
+        registry=policy_engine.registry,
+    )
     demo_6_result_validation(boundary_malicious)
 
     # Summary

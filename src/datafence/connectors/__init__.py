@@ -1,13 +1,13 @@
 """
 DataFence data connectors.
 
-v0.5 connector architecture
+v0.6 connector architecture
 ----------------------------
 All v0.5 connectors accept ONLY signed AuthorizedExecution capabilities.
 They verify the HMAC signature before execution and validate all SQL
 identifiers.  They never accept raw SQL or the legacy ExecutionRequest.
 
-v0.5 (production-path) connectors
+v0.6 (canonical-path) connectors
 ----------------------------------
   SQLiteConnector           — reference implementation, fully integrated
   PostgreSQLConnector       — requires: pip install datafence[postgres]
@@ -25,14 +25,14 @@ These legacy connectors are NOT imported here.  They remain in the package
 only for direct import by code that explicitly depends on the old interface.
 """
 
-# v0.5 reference connector (always available — no extra deps)
+# v0.6 reference connector (always available — no extra deps)
 from datafence.connectors.sqlite_connector import (
     MaliciousConnector,
     SQLiteConnector,
     create_demo_database,
 )
 
-# v0.5 optional connectors (gracefully absent if deps not installed)
+# v0.6 optional connectors (gracefully absent if deps not installed)
 try:
     from datafence.connectors.postgres_connector import PostgreSQLConnector
 except ImportError:
@@ -49,7 +49,7 @@ except ImportError:
     SnowflakeConnector = None  # type: ignore[assignment,misc]
 
 __all__ = [
-    # v0.5
+    # v0.6
     "SQLiteConnector",
     "MaliciousConnector",
     "create_demo_database",

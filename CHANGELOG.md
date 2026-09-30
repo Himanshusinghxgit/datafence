@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-09-27
 
-### 🎉 First Production Release
+### Contract-Frozen Security Boundary
 
-DataFence 1.0.0 is the first production-ready release with comprehensive features for securing AI agents' access to enterprise data.
+DataFence 1.0.0 freezes the deterministic authorization boundary as a
+security-boundary prototype. It is not a production-readiness or compliance
+claim; external security review and operational hardening remain required.
 
 ### Added - Core Features (Phase 1)
 

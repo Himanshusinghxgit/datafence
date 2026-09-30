@@ -37,6 +37,7 @@ policy_engine = create_banking_demo_policy()
 boundary = DataFenceBoundary.create(
     policy_engine=policy_engine,
     connector_factory=SQLiteConnector,
+    registry=policy_engine.registry,
     database_path=db_path
 )
 

@@ -165,10 +165,21 @@ class ResourceRegistry:
 
     def __init__(self) -> None:
         self._resources: dict[str, ResourceDefinition] = {}
+        self._frozen = False
 
     def register(self, resource: ResourceDefinition) -> None:
         """Register a resource definition."""
+        if self._frozen:
+            raise RuntimeError("ResourceRegistry is frozen")
         self._resources[resource.name] = resource
+
+    def freeze(self) -> None:
+        """Freeze schema metadata before a boundary begins serving requests."""
+        self._frozen = True
+
+    @property
+    def is_frozen(self) -> bool:
+        return self._frozen
 
     def get(self, name: str) -> ResourceDefinition | None:
         """Return the ResourceDefinition for *name*, or None."""

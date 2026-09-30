@@ -36,16 +36,18 @@ Usage (standalone HTTP-based MCP server)::
     from datafence.core.policy import create_banking_policy
     from datafence.connectors.sqlite_connector import create_demo_database
 
+    policy_engine = create_banking_policy()
     boundary = DataFenceBoundary.create(
-        policy_engine=create_banking_policy(),
+        policy_engine=policy_engine,
         connector_factory=create_demo_database,
+        registry=policy_engine.registry,
         database_path="/data/banking.db",
     )
 
     server = DataFenceMCPServer(
         boundary=boundary,
         server_name="banking-datafence",
-        version="0.5.0",
+        version="0.6.0",
     )
 
     # With a MCP HTTP transport:

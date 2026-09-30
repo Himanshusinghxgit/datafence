@@ -61,6 +61,7 @@ def boundary(policy_engine, signing_key):
     boundary = DataFenceBoundary.create(
         policy_engine=policy_engine,
         connector_factory=SQLiteConnector,
+        registry=policy_engine.registry,
         database_path=db_path
     )
     

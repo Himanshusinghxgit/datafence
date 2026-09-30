@@ -318,6 +318,11 @@ class DataFencePolicyEngine(PolicyEngine):
     def policy_version(self) -> str:
         return self._policy.version
 
+    @property
+    def registry(self) -> Any:
+        """The immutable-at-construction schema registry used by this engine."""
+        return self._registry
+
     def evaluate(
         self, principal: Any, intent: Any,
     ) -> "PolicyDecision":

@@ -21,6 +21,7 @@ Usage::
     boundary = DataFenceBoundary.create(
         policy_engine=policy_engine,
         connector_factory=SnowflakeConnector,
+        registry=policy_engine.registry,
         account="myaccount.us-east-1",
         user="datafence_service",
         password="...",
@@ -96,6 +97,10 @@ class SnowflakeConnector:
             raise CapabilityVerificationError(
                 f"Invalid capability signature for execution "
                 f"{capability.execution_id!r}."
+            )
+        if capability.is_expired():
+            raise CapabilityVerificationError(
+                f"Expired capability for execution {capability.execution_id!r}"
             )
 
         sql, params = self._compile(capability)

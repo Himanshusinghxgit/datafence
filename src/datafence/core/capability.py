@@ -27,7 +27,8 @@ import hmac
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
+from uuid import uuid4
 from typing import Any
 
 from datafence.core.types import Actor, Operation
@@ -66,6 +67,11 @@ class AuthorizedExecution:
     # Policy provenance
     policy_version: str
     policy_decisions: list[str] = field(default_factory=list)
+
+    # Capability lifecycle / audience binding
+    expires_at: datetime | None = None
+    audience: str = "datafence"
+    nonce: str = ""
     
     # Cryptographic signature (HMAC-SHA256)
     signature: bytes = field(default=b'', repr=False)
@@ -86,11 +92,14 @@ class AuthorizedExecution:
             json.dumps(self.actor.metadata, sort_keys=True),
             self.resource,
             self.operation.value,
-            ",".join(sorted(self.selected_fields)),
+            json.dumps(self.selected_fields, separators=(",", ":")),
             json.dumps(self.enforced_filters, sort_keys=True),
             str(self.limit),
             self.policy_version,
-            ",".join(sorted(self.policy_decisions)),
+            json.dumps(self.policy_decisions, separators=(",", ":")),
+            self.expires_at.isoformat() if self.expires_at else "",
+            self.audience,
+            self.nonce,
         ]
         
         canonical = "|".join(parts)
@@ -127,6 +136,10 @@ class AuthorizedExecution:
         
         expected_signature = self.compute_signature(signing_key)
         return hmac.compare_digest(self.signature, expected_signature)
+
+    def is_expired(self, now: datetime | None = None) -> bool:
+        """Return whether this capability is outside its validity window."""
+        return self.expires_at is not None and (now or datetime.utcnow()) >= self.expires_at
     
     @staticmethod
     def create_signed(
@@ -140,6 +153,9 @@ class AuthorizedExecution:
         policy_version: str,
         policy_decisions: list[str],
         signing_key: bytes,
+        expires_at: datetime | None = None,
+        audience: str = "datafence",
+        nonce: str | None = None,
     ) -> "AuthorizedExecution":
         """
         Create a signed capability.
@@ -163,9 +179,10 @@ class AuthorizedExecution:
             Signed AuthorizedExecution capability
         """
         # Create unsigned capability
+        created_at = datetime.utcnow()
         capability = AuthorizedExecution(
             execution_id=execution_id,
-            created_at=datetime.utcnow(),
+            created_at=created_at,
             actor=actor,
             resource=resource,
             operation=operation,
@@ -174,6 +191,9 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
+            expires_at=expires_at or created_at + timedelta(minutes=5),
+            audience=audience,
+            nonce=nonce or uuid4().hex,
             signature=b'',  # Temporary
         )
         
@@ -193,6 +213,9 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
+            expires_at=capability.expires_at,
+            audience=capability.audience,
+            nonce=capability.nonce,
             signature=signature,
         )
         
@@ -208,6 +231,8 @@ class AuthorizedExecution:
             raise ValueError("selected_fields cannot be empty")
         if self.limit <= 0:
             raise ValueError("limit must be positive")
+        if not self.audience:
+            raise ValueError("audience cannot be empty")
 
 
 class CapabilityVerificationError(Exception):
