@@ -397,34 +397,42 @@ class TestDataFencePolicyEngine:
 
     def test_allow_read_authorised_fields(self, banking_engine):
         actor = Actor(id="u", tenant_id="acme")
-        decision = banking_engine.evaluate(actor, "transactions", "read",
-                                           ["id", "merchant", "amount"])
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ, ["id", "merchant", "amount"])
+        )
         assert decision.is_allow
         assert "id" in decision.allowed_fields
         assert "card_number" not in decision.allowed_fields
 
     def test_deny_read_denied_field(self, banking_engine):
         actor = Actor(id="u", tenant_id="acme")
-        decision = banking_engine.evaluate(actor, "transactions", "read",
-                                           ["id", "card_number"])
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ, ["id", "card_number"])
+        )
         assert decision.is_deny
         assert any("denied" in r.lower() for r in decision.reasons)
 
     def test_deny_delete_operation(self, banking_engine):
         actor = Actor(id="u", tenant_id="acme")
-        decision = banking_engine.evaluate(actor, "transactions", "delete")
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.DELETE)
+        )
         assert decision.is_deny
 
     def test_deny_unknown_resource(self, banking_engine):
         actor = Actor(id="u", tenant_id="acme")
-        decision = banking_engine.evaluate(actor, "secret_vault", "read")
+        decision = banking_engine.evaluate(
+            actor, Intent("secret_vault", Operation.READ)
+        )
         assert decision.is_deny
         assert any("No policy" in r for r in decision.reasons)
 
     def test_enforced_filter_injected(self, banking_engine):
         """Policy injects tenant filter — LLM does not need to provide it."""
         actor = Actor(id="u", tenant_id="myorg")
-        decision = banking_engine.evaluate(actor, "transactions", "read")
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ)
+        )
         assert decision.is_allow
         # Enforced filter resolves actor reference
         filt = decision.enforced_filter
@@ -437,27 +445,32 @@ class TestDataFencePolicyEngine:
         actor_a = Actor(id="u", tenant_id="org_a")
         actor_b = Actor(id="v", tenant_id="org_b")
 
-        dec_a = banking_engine.evaluate(actor_a, "transactions", "read")
-        dec_b = banking_engine.evaluate(actor_b, "transactions", "read")
+        dec_a = banking_engine.evaluate(actor_a, Intent("transactions", Operation.READ))
+        dec_b = banking_engine.evaluate(actor_b, Intent("transactions", Operation.READ))
 
         assert dec_a.enforced_filter.to_dict()["tenant_id"] == "org_a"
         assert dec_b.enforced_filter.to_dict()["tenant_id"] == "org_b"
 
     def test_row_limit_enforced(self, banking_engine):
         actor = Actor(id="u", tenant_id="x")
-        decision = banking_engine.evaluate(actor, "transactions", "read")
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ)
+        )
         assert decision.row_limit.value == 100
 
     def test_all_fields_returned_when_none_requested(self, banking_engine):
         actor = Actor(id="u", tenant_id="x")
-        decision = banking_engine.evaluate(actor, "transactions", "read",
-                                           requested_fields=None)
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ)
+        )
         assert decision.is_allow
         assert set(decision.allowed_fields) == {"id", "merchant", "amount", "timestamp"}
 
     def test_obligations_present(self, banking_engine):
         actor = Actor(id="u", tenant_id="x")
-        decision = banking_engine.evaluate(actor, "transactions", "read")
+        decision = banking_engine.evaluate(
+            actor, Intent("transactions", Operation.READ)
+        )
         assert decision.obligations.get("audit") is True
 
 
@@ -472,28 +485,30 @@ class TestYAMLPolicyLoader:
         policy = YAMLPolicyLoader.load("policies/banking.yaml")
         engine = DataFencePolicyEngine(policy)
         actor = Actor(id="u", tenant_id="t")
-        dec = engine.evaluate(actor, "transactions", "read")
+        dec = engine.evaluate(actor, Intent("transactions", Operation.READ))
         assert dec.is_allow
 
     def test_transactions_delete_denied(self):
         policy = YAMLPolicyLoader.load("policies/banking.yaml")
         engine = DataFencePolicyEngine(policy)
         actor = Actor(id="u", tenant_id="t")
-        dec = engine.evaluate(actor, "transactions", "delete")
+        dec = engine.evaluate(actor, Intent("transactions", Operation.DELETE))
         assert dec.is_deny
 
     def test_denied_fields_blocked(self):
         policy = YAMLPolicyLoader.load("policies/banking.yaml")
         engine = DataFencePolicyEngine(policy)
         actor = Actor(id="u", tenant_id="t")
-        dec = engine.evaluate(actor, "transactions", "read", ["id", "card_number"])
+        dec = engine.evaluate(
+            actor, Intent("transactions", Operation.READ, ["id", "card_number"])
+        )
         assert dec.is_deny
 
     def test_row_rule_injected(self):
         policy = YAMLPolicyLoader.load("policies/banking.yaml")
         engine = DataFencePolicyEngine(policy)
         actor = Actor(id="u", tenant_id="org99")
-        dec = engine.evaluate(actor, "transactions", "read")
+        dec = engine.evaluate(actor, Intent("transactions", Operation.READ))
         assert dec.is_allow
         assert dec.enforced_filter.to_dict().get("tenant_id") == "org99"
 
@@ -514,7 +529,7 @@ class TestYAMLPolicyLoader:
         policy = YAMLPolicyLoader.from_dict(data)
         engine = DataFencePolicyEngine(policy)
         actor = Actor(id="user:alice", tenant_id="t")
-        dec = engine.evaluate(actor, "items", "read")
+        dec = engine.evaluate(actor, Intent("items", Operation.READ))
         assert dec.is_allow
         assert dec.enforced_filter.to_dict()["owner"] == "user:alice"
         assert dec.row_limit.value == 50
@@ -1027,19 +1042,20 @@ class TestResourceRegistry:
     def test_registry_integrated_with_policy_engine(self):
         """Policy engine with registry rejects unknown fields."""
         from datafence.core.policy import create_banking_policy
-        engine = create_banking_policy(with_registry=True)
+        engine = create_banking_policy()
         actor = Actor(id="u", tenant_id="t")
         # Request a field that doesn't exist in schema
-        dec = engine.evaluate(actor, "transactions", "read",
-                              requested_fields=["id", "nonexistent"])
+        dec = engine.evaluate(
+            actor, Intent("transactions", Operation.READ, ["id", "nonexistent"])
+        )
         assert dec.is_deny
 
     def test_registry_validates_resource_existence(self):
         """Policy engine with registry rejects unknown resources."""
         from datafence.core.policy import create_banking_policy
-        engine = create_banking_policy(with_registry=True)
+        engine = create_banking_policy()
         actor = Actor(id="u", tenant_id="t")
-        dec = engine.evaluate(actor, "ghost_table", "read")
+        dec = engine.evaluate(actor, Intent("ghost_table", Operation.READ))
         assert dec.is_deny
 
 

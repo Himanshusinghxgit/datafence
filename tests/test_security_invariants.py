@@ -310,22 +310,15 @@ def test_policy_evaluated_exactly_once(db_path):
     base_engine = create_banking_policy()
 
     class CountingEngine:
-        def evaluate(self, **kwargs):
+        def evaluate(self, *, principal, intent):
             call_count["n"] += 1
-            return base_engine.evaluate(**kwargs)
-        def get_policy_version(self):
-            return base_engine.get_policy_version()
-        def get_allowed_fields(self, **kw):
-            return base_engine.get_allowed_fields(**kw)
-        def get_enforced_filters(self, **kw):
-            return base_engine.get_enforced_filters(**kw)
-        def get_max_limit(self, **kw):
-            return base_engine.get_max_limit(**kw)
+            return base_engine.evaluate(principal=principal, intent=intent)
 
     engine = CountingEngine()
     b = DataFenceBoundary.create(
         policy_engine=engine,
         connector_factory=SQLiteConnector,
+        registry=base_engine._registry,
         database_path=db_path,
     )
     create_demo_database(db_path, b._signing_key)

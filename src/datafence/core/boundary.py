@@ -56,9 +56,8 @@ class PolicyEngine(Protocol):
         - matched_rules
         - obligations
 
-    There is no separate get_allowed_fields() / get_enforced_filters() /
-    get_max_limit() / get_policy_version() contract.  Those were the legacy
-    SimplePolicyEngine helpers and are no longer part of this interface.
+    PolicyDecision is the sole policy output.  The boundary never consults
+    secondary policy getters after evaluation.
     """
 
     def evaluate(self, principal: Actor, intent: Intent) -> EnginePolicyDecision:
@@ -207,9 +206,12 @@ class DataFenceBoundary:
         - Use create() factory to ensure proper key sharing
         - Direct construction may lead to key mismatch errors
         """
+        effective_registry = registry or getattr(policy_engine, "_registry", None)
+        if effective_registry is None:
+            raise ValueError("DataFenceBoundary requires a ResourceRegistry")
         self.policy_engine = policy_engine
         self._connector = connector  # PRIVATE - not accessible externally
-        self._registry = registry
+        self._registry = effective_registry
         self.validator = ResultValidator()
         
         # Set or generate signing key
@@ -264,6 +266,10 @@ class DataFenceBoundary:
         - Connector and boundary share same key
         - Key never exposed through public API
         """
+        effective_registry = registry or getattr(policy_engine, "_registry", None)
+        if effective_registry is None:
+            raise ValueError("DataFenceBoundary.create() requires a ResourceRegistry")
+
         # Generate signing key (32 bytes for HMAC-SHA256)
         signing_key = token_bytes(32)
         
@@ -276,7 +282,7 @@ class DataFenceBoundary:
         boundary.policy_engine = policy_engine
         boundary._connector = connector
         boundary._signing_key = signing_key
-        boundary._registry = registry
+        boundary._registry = effective_registry
         boundary.validator = ResultValidator()
         
         return boundary
@@ -310,12 +316,10 @@ class DataFenceBoundary:
 
         # Step 2: validate the resource before policy evaluation.  Registry
         # validation is descriptive, not authorization; policy still decides.
-        registry = self._registry or getattr(self.policy_engine, "_registry", None)
-        if registry is not None:
-            try:
-                registry.validate_intent(intent)
-            except ValueError as exc:
-                return self._denied(request, [str(exc)])
+        try:
+            self._registry.validate_intent(intent)
+        except ValueError as exc:
+            return self._denied(request, [str(exc)])
 
         # Step 3: single policy evaluation — the exact decision is passed to
         # capability construction and denial evidence.

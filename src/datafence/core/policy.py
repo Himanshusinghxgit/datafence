@@ -268,9 +268,7 @@ class PolicyEngine:
     Subclass this or use DataFencePolicyEngine.
     """
 
-    def evaluate(self, principal: Any, intent: Any = None, resource: str = "",
-                 operation: Any = None,
-                 requested_fields: list[str] | None = None) -> PolicyDecision:
+    def evaluate(self, principal: Any, intent: Any) -> PolicyDecision:
         raise NotImplementedError
 
     @property
@@ -297,16 +295,20 @@ class DataFencePolicyEngine(PolicyEngine):
 
         from datafence.core.policy import DataFencePolicyEngine, DataFencePolicy
         from datafence.core.policy import YAMLPolicyLoader
+        from datafence.core.types import Intent, Operation
+        from datafence.core.registry import create_banking_registry
 
         policy = YAMLPolicyLoader.load("policies/banking.yaml")
-        engine = DataFencePolicyEngine(policy)
-        decision = engine.evaluate(principal, "transactions", "read",
-                                   requested_fields=["id", "merchant", "amount"])
+        engine = DataFencePolicyEngine(policy, create_banking_registry())
+        decision = engine.evaluate(
+            principal,
+            Intent("transactions", Operation.READ, ["id", "merchant", "amount"]),
+        )
     """
 
     def __init__(self, policy: DataFencePolicy, registry: Any = None) -> None:
         self._policy = policy
-        self._registry = registry  # Optional ResourceRegistry
+        self._registry = registry  # Registry is supplied by the boundary.
 
     @property
     def policy_name(self) -> str:
@@ -316,78 +318,18 @@ class DataFencePolicyEngine(PolicyEngine):
     def policy_version(self) -> str:
         return self._policy.version
 
-    # ------------------------------------------------------------------
-    # Backward-compat methods (old SimplePolicyEngine interface)
-    # ------------------------------------------------------------------
-
-    def get_policy_version(self) -> str:
-        """Backward-compat alias for boundary's old interface."""
-        return self._policy.version
-
-    def get_allowed_fields(self, actor: Any, resource: str) -> list[str]:
-        """Backward-compat: return allowed fields for resource."""
-        rp = self._policy.resource_policy(resource)
-        if not rp:
-            return []
-        return [f for f in rp.allowed_fields if f not in rp.denied_fields]
-
-    def get_enforced_filters(self, actor: Any, resource: str) -> dict[str, str]:
-        """Backward-compat: return enforced filter dict (unresolved)."""
-        rp = self._policy.resource_policy(resource)
-        if not rp:
-            return {}
-        return {r.field: str(r.value) for r in rp.row_rules}
-
-    def get_max_limit(self, actor: Any, resource: str) -> int:
-        """Backward-compat: return max rows for resource."""
-        rp = self._policy.resource_policy(resource)
-        if not rp:
-            return 100
-        return rp.max_rows
-
     def evaluate(
-        self,
-        principal: Any = None,
-        intent: Any = None,
-        resource: str = "",
-        operation: Any = None,  # Operation enum OR action string
-        requested_fields: list[str] | None = None,
-        # Backward-compat keyword alias
-        actor: Any = None,
+        self, principal: Any, intent: Any,
     ) -> "PolicyDecision":
         """
-        Evaluate policy for *principal* requesting *operation* on *resource*.
-
-        Accepts either an Operation enum (from boundary) or a plain string.
-        Also accepts ``actor`` keyword for backward compatibility with the
-        old SimplePolicyEngine interface.
+        Evaluate one untrusted intent for one trusted principal.
 
         If a ResourceRegistry was provided at construction, validates fields
         against the registry schema before checking policy rules.
         """
-        # Canonical v0.6 contract: evaluate(principal, intent).  Keep the
-        # old keyword form below as a compatibility shim for callers that use
-        # the policy engine directly; the boundary uses only the canonical
-        # form and evaluates exactly once.
-        if intent is not None and hasattr(intent, "resource"):
-            resource = intent.resource
-            operation = intent.operation
-            requested_fields = intent.fields or []
-        elif intent is not None:
-            # Legacy positional form: evaluate(actor, resource, action,
-            # requested_fields).  This is intentionally kept only on the
-            # concrete engine, outside the boundary protocol.
-            legacy_resource, legacy_operation = intent, resource
-            legacy_fields = operation if isinstance(operation, list) else requested_fields
-            resource, operation, requested_fields = (
-                legacy_resource, legacy_operation, legacy_fields
-            )
-
-        # Backward-compat: accept 'actor' kwarg
-        if principal is None and actor is not None:
-            principal = actor
-        if principal is None:
-            raise ValueError("principal (or actor) must be provided")
+        resource = intent.resource
+        operation = intent.operation
+        requested_fields = intent.fields or []
 
         # Normalise operation to lowercase string
         if hasattr(operation, 'value'):
@@ -600,44 +542,13 @@ class YAMLPolicyLoader:
         )
 
 
-# ---------------------------------------------------------------------------
-# Backward-compat: bridge the old SimplePolicyEngine API to the new one
-# ---------------------------------------------------------------------------
-
-def _bridge_to_new_decision(old_decision: Any, policy_name: str,
-                             policy_version: str) -> PolicyDecision:
-    """
-    Convert an old-style PolicyDecision (from core/types.py) to the new
-    PolicyDecision (from core/policy.py).
-
-    The old type used Decision.ALLOW/DENY enum; the new uses PolicyEffect.
-    """
-    from datafence.core.types import Decision as OldDecision
-    if old_decision.decision == OldDecision.ALLOW:
-        return PolicyDecision.allow(
-            allowed_fields=[],          # boundary will populate from engine helpers
-            enforced_filter=Filter.empty(),
-            row_limit=RowLimit.default(),
-            policy_name=policy_name,
-            policy_version=policy_version,
-            matched_rules=list(old_decision.matched_policies),
-        )
-    return PolicyDecision.deny(
-        reasons=list(old_decision.reasons),
-        policy_name=policy_name,
-        policy_version=policy_version,
-    )
-
-
-def create_banking_policy(with_registry: bool = True) -> "DataFencePolicyEngine":
+def create_banking_policy() -> "DataFencePolicyEngine":
     """
     Create the banking demo policy using the Phase-3 model.
 
     This is the v2 replacement for create_banking_demo_policy() in policy_engine.py.
 
-    Args:
-        with_registry: If True (default), attach the banking ResourceRegistry
-                       so field validation runs against the actual schema.
+    The banking registry is mandatory for the returned policy engine.
     """
     from datafence.core.policy import (
         ActionDecision, DataFencePolicy, DataFencePolicyEngine,
@@ -702,8 +613,6 @@ def create_banking_policy(with_registry: bool = True) -> "DataFencePolicyEngine"
             ),
         },
     )
-    registry = None
-    if with_registry:
-        from datafence.core.registry import create_banking_registry
-        registry = create_banking_registry()
+    from datafence.core.registry import create_banking_registry
+    registry = create_banking_registry()
     return DataFencePolicyEngine(policy, registry=registry)
