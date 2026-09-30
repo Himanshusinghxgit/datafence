@@ -1,5 +1,5 @@
 """
-DataFence Resource Registry (v0.5.1).
+DataFence Resource Registry (v0.6.0).
 
 The Registry answers:
   - Does this resource exist?
@@ -34,6 +34,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from datafence.core.resources import validate_identifier
 
 
 class DataClassification(Enum):
@@ -91,6 +93,17 @@ class ResourceDefinition:
     fields: dict[str, FieldDefinition] = field(default_factory=dict)
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    supported_operations: tuple[str, ...] = ("read", "insert", "update", "delete")
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.name, context="resource name")
+        for field_name in self.fields:
+            validate_identifier(field_name, context="field name")
+        if not self.supported_operations:
+            raise ValueError("A resource must support at least one operation")
+        for operation in self.supported_operations:
+            if operation not in {"read", "insert", "update", "delete"}:
+                raise ValueError(f"Unsupported resource operation: {operation!r}")
 
     def field_names(self) -> list[str]:
         return list(self.fields.keys())
@@ -184,6 +197,29 @@ class ResourceRegistry:
                 f"Unknown fields on {resource_name!r}: {unknown}. "
                 f"Valid fields: {resource.field_names()}"
             )
+
+    def validate_intent(self, intent: Any) -> None:
+        """Validate the descriptive/schema part of an intent.
+
+        This deliberately does not authorize the principal.  It only ensures
+        that the boundary never sends an unknown resource, field, or operation
+        to policy evaluation or a connector.
+        """
+        validate_identifier(intent.resource, context="resource name")
+        resource = self._resources.get(intent.resource)
+        if resource is None:
+            raise ValueError(f"Unknown resource: {intent.resource!r}")
+        operation = getattr(intent.operation, "value", intent.operation)
+        if str(operation).lower() not in resource.supported_operations:
+            raise ValueError(
+                f"Operation {operation!r} is not supported on resource {intent.resource!r}"
+            )
+        fields = intent.fields or []
+        self.validate_fields(intent.resource, fields)
+        for field_name in intent.filters:
+            validate_identifier(field_name, context="filter field name")
+        if intent.limit is not None and intent.limit <= 0:
+            raise ValueError("Intent limit must be positive")
 
     def all_resources(self) -> list[str]:
         return list(self._resources.keys())

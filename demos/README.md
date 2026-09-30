@@ -354,7 +354,7 @@ These tests prove the 13 security guarantees listed above.
 
 After running this demo, you understand:
 
-1. **The Core**: ExecutionPlan is the authorized contract
+1. **The Core**: AuthorizedExecution is the signed execution capability; ExecutionPlan is audit-only
 2. **The Boundary**: LLM SQL never reaches the database
 3. **The Validation**: Security on request AND result
 4. **The Evidence**: Complete provenance trail

@@ -415,7 +415,7 @@ def run_killer_demo():
 
     print("Key Security Properties:")
     print("  1. Database NEVER executes LLM's raw SQL")
-    print("  2. ExecutionPlan is the authorized contract")
+    print("  2. AuthorizedExecution is the signed execution capability")
     print("  3. Policy evaluation happens BEFORE execution")
     print("  4. Result validation happens AFTER execution")
     print("  5. Fail closed on all errors")

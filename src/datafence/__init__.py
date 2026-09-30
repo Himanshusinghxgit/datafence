@@ -3,7 +3,7 @@ DataFence — Policy-Enforced Data Execution for AI.
 
 The core principle: The model proposes. DataFence decides.
 
-Version 0.5.0 — Unified v0.5 architecture
+Version 0.6.0 — Unified capability boundary with Resource Registry
 ------------------------------------------
 All legacy v0.1–v0.4 code has been moved to datafence._legacy/.
 The public API exposes only the v0.5 capability-based architecture.
@@ -119,7 +119,7 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "0.5.3"
+__version__ = "0.6.0"
 
 __all__ = [
     # ── Core ─────────────────────────────────────────────────────────────

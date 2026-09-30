@@ -2,7 +2,7 @@
 Provenance and evidence models.
 
 Provenance tracks where data came from.
-Evidence provides cryptographic proof of policy compliance.
+Evidence records tamper-evident execution provenance.
 """
 
 from datetime import datetime
@@ -33,10 +33,11 @@ class Provenance(BaseModel):
 
 class Evidence(BaseModel):
     """
-    Cryptographic evidence of policy-compliant execution.
+    Tamper-evident evidence of execution through the controlled policy path.
 
     This is NOT proof that the LLM is correct.
-    This IS proof that the result was produced through a controlled, policy-compliant path.
+    This records that the result passed the boundary's configured checks; it is
+    not cryptographic proof that the database itself obeyed the policy.
     """
 
     verified: bool = Field(..., description="Whether all checks passed")

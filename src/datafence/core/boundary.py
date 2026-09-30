@@ -38,6 +38,8 @@ from datafence.core.types import (
     Request,
 )
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
+from datafence.core.policy import PolicyDecision as EnginePolicyDecision
+from datafence.core.registry import ResourceRegistry
 
 
 class PolicyEngine(Protocol):
@@ -59,13 +61,7 @@ class PolicyEngine(Protocol):
     SimplePolicyEngine helpers and are no longer part of this interface.
     """
 
-    def evaluate(
-        self,
-        actor: Actor,
-        resource: str,
-        operation: Operation,
-        requested_fields: list[str],
-    ) -> Any:
+    def evaluate(self, principal: Actor, intent: Intent) -> EnginePolicyDecision:
         """
         Evaluate policy for a request.
 
@@ -74,10 +70,6 @@ class PolicyEngine(Protocol):
             .reasons      — tuple of strings (populated on DENY)
             .allowed_fields, .enforced_filter, .row_limit, .policy_version
         """
-        ...
-
-    def get_policy_version(self) -> str:
-        """Return the policy version string (used in Evidence/audit)."""
         ...
 
 
@@ -197,6 +189,7 @@ class DataFenceBoundary:
         policy_engine: PolicyEngine,
         connector: Connector,
         signing_key: bytes = None,
+        registry: ResourceRegistry | None = None,
     ):
         """
         Initialize DataFence boundary.
@@ -216,6 +209,7 @@ class DataFenceBoundary:
         """
         self.policy_engine = policy_engine
         self._connector = connector  # PRIVATE - not accessible externally
+        self._registry = registry
         self.validator = ResultValidator()
         
         # Set or generate signing key
@@ -239,6 +233,7 @@ class DataFenceBoundary:
         cls,
         policy_engine: PolicyEngine,
         connector_factory: callable,
+        registry: ResourceRegistry | None = None,
         **connector_kwargs
     ) -> "DataFenceBoundary":
         """
@@ -281,6 +276,7 @@ class DataFenceBoundary:
         boundary.policy_engine = policy_engine
         boundary._connector = connector
         boundary._signing_key = signing_key
+        boundary._registry = registry
         boundary.validator = ResultValidator()
         
         return boundary
@@ -312,20 +308,25 @@ class DataFenceBoundary:
         """
         request = Request.create(actor, intent)
 
-        # Step 2: single policy evaluation — raw decision passed to capability builder
+        # Step 2: validate the resource before policy evaluation.  Registry
+        # validation is descriptive, not authorization; policy still decides.
+        registry = self._registry or getattr(self.policy_engine, "_registry", None)
+        if registry is not None:
+            try:
+                registry.validate_intent(intent)
+            except ValueError as exc:
+                return self._denied(request, [str(exc)])
+
+        # Step 3: single policy evaluation — the exact decision is passed to
+        # capability construction and denial evidence.
         try:
-            raw_decision = self.policy_engine.evaluate(
-                actor=actor,
-                resource=intent.resource,
-                operation=intent.operation,
-                requested_fields=intent.fields or [],
-            )
+            raw_decision = self.policy_engine.evaluate(principal=actor, intent=intent)
         except Exception as exc:
             return self._denied(request, [f"Policy evaluation failed: {exc}"])
 
         # Step 3: check decision
         if self._is_deny(raw_decision):
-            return self._denied(request, self._reasons(raw_decision))
+            return self._denied(request, self._reasons(raw_decision), raw_decision)
 
         # Step 4: build signed capability from the exact decision (no re-evaluation)
         try:
@@ -375,12 +376,16 @@ class DataFenceBoundary:
         """Extract denial reasons from a PolicyDecision."""
         return list(raw_decision.reasons)
 
-    def _denied(self, request: Request, reasons: list[str]) -> DeniedRequest:
+    def _denied(
+        self,
+        request: Request,
+        reasons: list[str],
+        source_decision: Any | None = None,
+    ) -> DeniedRequest:
         """Build a DeniedRequest with evidence."""
-        try:
-            policy_version = self.policy_engine.get_policy_version()
-        except Exception:
-            policy_version = "unknown"
+        # A denial produced by policy must carry the version from that same
+        # PolicyDecision.  Never consult a second mutable policy API here.
+        policy_version = getattr(source_decision, "policy_version", "unknown")
         pd = PolicyDecision(
             decision=Decision.DENY,
             reasons=reasons,

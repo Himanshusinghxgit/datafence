@@ -1,8 +1,8 @@
-# DataFence v0.5.0
+# DataFence v0.6.0
 
 **Policy-Enforced Data Execution for AI.**
 
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](https://github.com/Himanshusinghxgit/datafence)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/Himanshusinghxgit/datafence)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Status: Prototype](https://img.shields.io/badge/status-prototype-orange.svg)]()
@@ -57,7 +57,7 @@ DataFence decides whether that proposal becomes an executable capability:
 
 ## Status: Prototype
 
-DataFence v0.5 is an architectural prototype. The core security boundary is
+DataFence v0.6 is an architectural prototype. The core security boundary is
 operational and tested, but this is **not production-ready software**.
 
 ---
@@ -155,7 +155,7 @@ DataFence is **not** an IAM system. It authorizes the principal you provide.
 
 ## What's implemented
 
-### Core (v0.5, stable)
+### Core (v0.6, stable)
 ✅ Cryptographic capability model (HMAC-SHA256)  
 ✅ Typed execution IR (ResourceRef, FieldRef, Predicate, Filter, Projection)  
 ✅ Identifier validation — no f-string interpolation of SQL identifiers  
@@ -169,10 +169,10 @@ DataFence is **not** an IAM system. It authorizes the principal you provide.
 ✅ Security regression test suite (all v0.3 attacks blocked)  
 
 ### Connectors
-✅ SQLite — reference implementation, v0.5 capability interface  
-⚠️ PostgreSQL — v0.5 interface, **not integration-tested** (no real DB in CI)  
-⚠️ Athena — v0.5 interface, **not integration-tested**  
-⚠️ Snowflake — v0.5 interface, **not integration-tested**  
+✅ SQLite — reference implementation, v0.6 capability interface<br>
+⚠️ PostgreSQL — capability interface, **not integration-tested** (no real DB in CI)<br>
+⚠️ Athena — capability interface, **not integration-tested**<br>
+⚠️ Snowflake — capability interface, **not integration-tested**
 
 The legacy v0.1–v0.3 connectors (connectors/postgres.py, connectors/athena.py,
 connectors/snowflake.py) are **deprecated** and lack capability signatures.
@@ -230,9 +230,8 @@ python demos/killer_demo.py
 
 | Version | Focus |
 |---------|-------|
-| **v0.5.3** ✅ | Single policy interface, compat shim removed, 15 security invariants |
-| v0.6.0 | Resource Registry in boundary, PostgreSQL integration tests |
-| v0.6.0 | Resource Registry in all connectors, policy semantics formalization |
+| **v0.6.0** ✅ | Single policy decision path, Resource Registry in boundary |
+| v0.7.0 | Resource Registry in all connectors, policy semantics formalization |
 | v0.7.0 | PostgreSQL production hardening + CI integration tests |
 | v0.8.0 | Athena / Snowflake production hardening |
 | v0.9.0 | MCP + integrations hardening, benchmarks |
@@ -273,6 +272,6 @@ Apache 2.0
 
 ---
 
-**Version:** 0.5.3  
+**Version:** 0.6.0
 **Status:** Prototype (Architecture stable)  
-**Next:** v0.6.0 — Resource Registry integration, PostgreSQL integration tests
+**Next:** PostgreSQL integration tests and broader connector verification

@@ -268,7 +268,8 @@ class PolicyEngine:
     Subclass this or use DataFencePolicyEngine.
     """
 
-    def evaluate(self, principal: Any, resource: str, action: str,
+    def evaluate(self, principal: Any, intent: Any = None, resource: str = "",
+                 operation: Any = None,
                  requested_fields: list[str] | None = None) -> PolicyDecision:
         raise NotImplementedError
 
@@ -347,6 +348,7 @@ class DataFencePolicyEngine(PolicyEngine):
     def evaluate(
         self,
         principal: Any = None,
+        intent: Any = None,
         resource: str = "",
         operation: Any = None,  # Operation enum OR action string
         requested_fields: list[str] | None = None,
@@ -363,6 +365,24 @@ class DataFencePolicyEngine(PolicyEngine):
         If a ResourceRegistry was provided at construction, validates fields
         against the registry schema before checking policy rules.
         """
+        # Canonical v0.6 contract: evaluate(principal, intent).  Keep the
+        # old keyword form below as a compatibility shim for callers that use
+        # the policy engine directly; the boundary uses only the canonical
+        # form and evaluates exactly once.
+        if intent is not None and hasattr(intent, "resource"):
+            resource = intent.resource
+            operation = intent.operation
+            requested_fields = intent.fields or []
+        elif intent is not None:
+            # Legacy positional form: evaluate(actor, resource, action,
+            # requested_fields).  This is intentionally kept only on the
+            # concrete engine, outside the boundary protocol.
+            legacy_resource, legacy_operation = intent, resource
+            legacy_fields = operation if isinstance(operation, list) else requested_fields
+            resource, operation, requested_fields = (
+                legacy_resource, legacy_operation, legacy_fields
+            )
+
         # Backward-compat: accept 'actor' kwarg
         if principal is None and actor is not None:
             principal = actor
