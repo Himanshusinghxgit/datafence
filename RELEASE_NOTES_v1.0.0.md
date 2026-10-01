@@ -2,13 +2,18 @@
 
 **Release Date**: September 27, 2026
 
-**Status**: ✅ Production Ready
+**Status**: ✅ Stable security-boundary baseline; external review required
+
+> This release is not a production-readiness or compliance certification. The
+> current implementation is strongest with the SQLite reference connector.
+> Replay stores, KMS/key rotation, schema-drift detection, advanced predicate
+> algebra, and full cloud-connector conformance remain future work.
 
 ---
 
 ## 🎉 Introducing DataFence 1.0
 
-We're excited to announce the first production release of DataFence - a deterministic security boundary between AI agents and enterprise data.
+DataFence 1.0.0 defines a stable security-boundary baseline between AI agents and enterprise data. It is not a production-readiness certification.
 
 ### What is DataFence?
 
@@ -80,22 +85,28 @@ pip install 'datafence[all]'
 ### Quick Example
 
 ```python
-from datafence import DataFence
-from datafence.connectors import PostgreSQLConnector
+from datafence import DataFenceBoundary, create_banking_policy
+from datafence.connectors.sqlite_connector import SQLiteConnector
 
 # Setup
-connector = PostgreSQLConnector(host="localhost", database="mydb", ...)
-fence = DataFence.from_yaml("policy.yaml", connector)
+policy_engine = create_banking_policy()
+boundary = DataFenceBoundary.create(
+    policy_engine=policy_engine,
+    registry=policy_engine.registry,
+    connector_factory=SQLiteConnector,
+    database_path="data.db",
+)
 
 # Execute with security
-result = fence.execute({
-    "actor": {"id": "user:123", "tenant_id": "acme"},
-    "operation": "read",
-    "resource": "transactions",
-    "fields": ["id", "amount", "merchant"],
-    "filters": {"customer_id": "123"},
-    "limit": 10
-})
+result = boundary.execute(
+    Actor(id="user:123", tenant_id="acme"),
+    Intent(
+        resource="transactions",
+        operation=Operation.READ,
+        fields=["id", "amount", "merchant"],
+        limit=10,
+    ),
+)
 
 if result.verified:
     print(f"✓ Allowed: {len(result.data)} rows")
@@ -332,7 +343,7 @@ See [deploy/README.md](deploy/README.md) for complete instructions.
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md)
 
-- Report bugs via [GitHub Issues](https://github.com/yourusername/datafence/issues)
+- Report bugs via [GitHub Issues](https://github.com/Himanshusinghxgit/datafence/issues)
 - Submit pull requests
 - Improve documentation
 - Share use cases
@@ -358,7 +369,7 @@ Special thanks to:
 
 - **Documentation**: [docs/](docs/)
 - **Examples**: [examples/](examples/)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/datafence/issues)
+- **Issues**: [GitHub Issues](https://github.com/Himanshusinghxgit/datafence/issues)
 - **Security**: security@datafence.dev
 
 ---

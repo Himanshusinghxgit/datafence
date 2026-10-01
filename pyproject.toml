@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datafence"
 version = "1.0.0"
-description = "A deterministic authorization and execution boundary for AI agents accessing data (Prototype)"
+description = "A deterministic authorization and execution boundary for AI agents accessing data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["security", "ai", "llm", "data-governance", "policy-engine"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
@@ -79,10 +79,10 @@ dev = [
 datafence = "datafence.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourusername/datafence"
-Documentation = "https://github.com/yourusername/datafence#readme"
-Repository = "https://github.com/yourusername/datafence"
-Issues = "https://github.com/yourusername/datafence/issues"
+Homepage = "https://github.com/Himanshusinghxgit/datafence"
+Documentation = "https://github.com/Himanshusinghxgit/datafence#readme"
+Repository = "https://github.com/Himanshusinghxgit/datafence"
+Issues = "https://github.com/Himanshusinghxgit/datafence/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
