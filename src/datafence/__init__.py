@@ -1,43 +1,51 @@
 """
-DataFence — Deterministic authorization boundary for AI agents accessing enterprise data.
+DataFence — Deterministic authorization boundary for AI/agent access to enterprise data.
 
-Core principle: **The model proposes. DataFence decides. The customer's backend executes.**
+Core principle: **The AI proposes. DataFence decides. The customer's application executes.**
 
-Security invariant
-------------------
-An untrusted AI agent must never be able to cause an enterprise data connector to
-execute an operation that DataFence has not explicitly authorized.
+The problem
+-----------
+AI systems are probabilistic and potentially untrusted.
+Enterprise authorization cannot be probabilistic.
+DataFence is the deterministic boundary between them.
 
 Canonical flow::
 
-    Principal (from application auth layer)
-        +
-    Intent (from AI agent — untrusted)
-        |
-        v
+    Authentication (app-owned)
+          ↓
+    Principal (trusted identity)
+          +
+    Intent (untrusted AI request)
+          ↓
     DataFenceBoundary.authorize()
-        |
-        ├─ ResourceRegistry.validate_intent()
-        ├─ DataFencePolicyEngine.evaluate()
-        └─ AuthorizedExecution (HMAC-signed)
-                |
-                v
-        customer_connector.execute(authorized)   ← customer-owned
-                |
-                v
-        Enterprise data
+          ├─ ResourceRegistry.validate_intent()  — schema check
+          ├─ PolicyEngine.evaluate()             — who can do what
+          └─ AuthorizedExecution (HMAC-signed)   — the authorization artifact
+                    ↓
+          customer_connector.execute(authorized)  ← customer-owned
+                    ↓
+          Enterprise data
+
+DataFence does NOT own:
+  - the connector
+  - the database
+  - credentials
+  - query execution
+  - result rows
 
 Quick start::
 
     from secrets import token_bytes
     from datafence import (
-        Actor, DataFenceBoundary, Intent, Operation,
+        Principal, DataFenceBoundary, Intent, Operation,
         DataFencePolicyEngine, DataFencePolicy, ResourcePolicy, ActionDecision,
         ResourceRegistry, ResourceDefinition, FieldDefinition,
         CapabilityVerifier,
     )
+    from datafence.core.policy import RowRule
+    from datafence.core.resources import PredicateOperator
 
-    # 1. Build the registry (WHAT exists and its schema contract)
+    # 1. Build the registry — WHAT resources exist and their schema
     registry = ResourceRegistry()
     registry.register(ResourceDefinition("orders", fields={
         "id":        FieldDefinition("id", "integer"),
@@ -46,9 +54,7 @@ Quick start::
         "status":    FieldDefinition("status", "string"),
     }))
 
-    # 2. Define the policy (WHO can do WHAT)
-    from datafence.core.resources import PredicateOperator
-    from datafence.core.policy import RowRule
+    # 2. Define the policy — WHO can do WHAT
     policy = DataFencePolicy("orders-v1", "1.0", {
         "orders": ResourcePolicy(
             "orders",
@@ -60,32 +66,31 @@ Quick start::
     })
     engine = DataFencePolicyEngine(policy, registry=registry)
 
-    # 3. Create the boundary
+    # 3. Create the authorization boundary
     key = token_bytes(32)   # keep this secret
     fence = DataFenceBoundary.create(engine, registry, key)
 
-    # 4. Authorize (DataFence decides)
+    # 4. Authorize — DataFence decides
     authorized = fence.authorize(
-        Actor("user:alice", "tenant-acme"),
+        Principal("user:alice", "tenant-acme"),
         Intent("orders", Operation.READ, fields=["id", "total", "status"]),
     )
 
-    # 5. Pass to customer-owned connector (customer executes)
+    # 5. Verify and execute — customer decides how to run it
     CapabilityVerifier(key).verify(authorized)
     result = my_connector.execute(authorized)   # your code, your database
 
-DataFence does NOT own the connector, the database, credentials, or
-execution.  See ``examples/basic/`` for a fully runnable neutral example
-and ``docs/architecture.md`` for the security model.
+See ``examples/basic/`` for a fully runnable example.
+See ``docs/architecture.md`` for the security model.
 """
 
 # ---------------------------------------------------------------------------
-# Core boundary
+# Core authorization boundary
 # ---------------------------------------------------------------------------
 from datafence.core.boundary import DataFenceBoundary
 
 # ---------------------------------------------------------------------------
-# Capability contract and customer-side verifier
+# Capability and customer-side verifier
 # ---------------------------------------------------------------------------
 from datafence.core.capability import (
     AuthorizedExecution,
@@ -94,7 +99,7 @@ from datafence.core.capability import (
 )
 
 # ---------------------------------------------------------------------------
-# Policy engine (v1)
+# Policy engine
 # ---------------------------------------------------------------------------
 from datafence.core.policy import (
     ActionDecision,
@@ -108,9 +113,10 @@ from datafence.core.policy import (
 )
 
 # ---------------------------------------------------------------------------
-# Principal (richer alias for Actor with roles + attributes)
+# Principal — the trusted authenticated identity
+# Actor is a backward-compatibility alias for Principal.
 # ---------------------------------------------------------------------------
-from datafence.core.principal import Principal
+from datafence.core.principal import Actor, Principal
 
 # ---------------------------------------------------------------------------
 # Resource Registry
@@ -123,7 +129,7 @@ from datafence.core.registry import (
 )
 
 # ---------------------------------------------------------------------------
-# Typed execution IR
+# Typed predicate / filter IR
 # ---------------------------------------------------------------------------
 from datafence.core.resources import (
     FieldRef,
@@ -139,7 +145,6 @@ from datafence.core.resources import (
 # Core types
 # ---------------------------------------------------------------------------
 from datafence.core.types import (
-    Actor,
     Decision,
     Intent,
     Operation,
@@ -151,9 +156,7 @@ from datafence.core.types import (
 # ---------------------------------------------------------------------------
 from datafence.errors import (
     ConfigurationError,
-    ConnectorError,
     DataFenceError,
-    ExecutionError,
     PolicyDeniedError,
     PolicyError,
     ValidationError,
@@ -168,14 +171,15 @@ __all__ = [
     "AuthorizedExecution",
     "CapabilityVerifier",
     "CapabilityVerificationError",
-    # ── Types ────────────────────────────────────────────────────────────
-    "Actor",
+    # ── Principal / identity ─────────────────────────────────────────────
     "Principal",
+    "Actor",           # backward-compatibility alias
+    # ── Intent and operation ─────────────────────────────────────────────
     "Intent",
-    "Request",
     "Operation",
+    "Request",
     "Decision",
-    # ── Typed IR ─────────────────────────────────────────────────────────
+    # ── Typed predicate IR ───────────────────────────────────────────────
     "ResourceRef",
     "FieldRef",
     "Predicate",
@@ -202,7 +206,5 @@ __all__ = [
     "PolicyError",
     "PolicyDeniedError",
     "ValidationError",
-    "ConnectorError",
-    "ExecutionError",
     "ConfigurationError",
 ]

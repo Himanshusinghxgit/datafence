@@ -26,9 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "pydantic>=2.0.0",
     "pyyaml>=6.0",
-    "sqlparse>=0.4.0",
 ]
 
 [project.optional-dependencies]
@@ -93,6 +91,7 @@ target-version = "py310"
 exclude = [
     "src/datafence/_legacy",
     "tests/manual",
+    "attacks",
 ]
 
 [tool.ruff.lint]
@@ -111,7 +110,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.10"
-exclude = '(?x)^src/datafence/(?:_legacy|api\.py|audit|integrations|mcp|monitoring|optimization\.py|provenance|security|cli\.py)'
+exclude = '(?x)^src/datafence/(?:_legacy|api\.py|integrations|mcp|cli\.py)'
 ignore_missing_imports = true
 warn_return_any = true
 warn_unused_configs = true

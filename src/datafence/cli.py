@@ -163,38 +163,6 @@ def describe(policy_file: str, resource: str, format: str):
 
 
 @cli.command()
-@click.argument("policy_file", type=click.Path(exists=True))
-@click.argument("request_file", type=click.Path(exists=True))
-@click.option("--connector", "-c", type=click.Choice(["memory", "sqlite"]), default="memory")
-@click.option("--database", "-d", help="Database file (for sqlite connector)")
-@click.option("--dry-run", is_flag=True, help="Show decision without executing")
-@click.option("--verbose", "-v", is_flag=True, help="Show detailed output")
-def test(
-    policy_file: str,
-    request_file: str,
-    connector: str,
-    database: str | None,
-    dry_run: bool,
-    verbose: bool,
-):
-    """Report that the pre-v1 request runner is no longer supported."""
-    raise click.ClickException(
-        "The legacy request runner was removed in v1.0; use the typed boundary API."
-    )
-
-
-@cli.command()
-@click.argument("policy_file", type=click.Path(exists=True))
-@click.option("--framework", "-f", type=click.Choice(["openai", "claude"]), required=True)
-@click.option("--output", "-o", type=click.Path(), help="Output file (default: stdout)")
-def export(policy_file: str, framework: str, output: str | None):
-    """Report that the pre-v1 schema exporter is no longer supported."""
-    raise click.ClickException(
-        "The legacy schema exporter was removed in v1.0; use an integration adapter."
-    )
-
-
-@cli.command()
 @click.option("--output", "-o", type=click.Path(), default="policy.yaml")
 def init(output: str):
     """

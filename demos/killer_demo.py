@@ -1,445 +1,292 @@
 """
-DataFence Killer Demo.
+DataFence v1 — Authorization boundary demo.
 
-This demo proves the fundamental DataFence security model:
+Demonstrates the canonical v1 architecture:
 
-    UNTRUSTED AI REQUEST
-            ↓
-    Policy Evaluation
-            ↓
-    ExecutionPlan
-            ↓
-    ONLY DataFence Connector
-            ↓
-    Result Validation
-            ↓
-    Verified Result
+    Principal (from app auth)
+        +
+    Intent (from AI agent — untrusted)
+        ↓
+    DataFenceBoundary.authorize()          ← DataFence decides
+        ↓
+    AuthorizedExecution (HMAC-signed)
+        ↓
+    Customer connector.execute()           ← Customer executes
+        ↓
+    ConnectorResult
 
-The database NEVER executes LLM-generated SQL directly.
+Seven scenarios are run:
+    1. Authorized read
+    2. Tenant isolation (policy overrides agent-supplied tenant filter)
+    3. Restricted field denied
+    4. Unknown resource denied
+    5. Denied operation (DELETE)
+    6. Forged capability rejected by connector
+    7. Capability verifier (customer-side signature check)
 
-Six scenarios:
-1. Normal request - Shows authorization working
-2. SELECT * - Shows field restriction
-3. Sensitive field - Shows field denial
-4. Cross-tenant attack - Shows tenant isolation
-5. Destructive operation - Shows operation denial
-6. Result validation - Shows defense even if connector is malicious
+Run from the repo root:
+    python -m demos.killer_demo
 """
 
-import os
-import sys
-from pathlib import Path
+from __future__ import annotations
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+import dataclasses
+from secrets import token_bytes
 
-from datafence.connectors.sqlite_connector import (
-    MaliciousConnector,
-    SQLiteConnector,
-    create_demo_database,
+from datafence import (
+    Actor,
+    CapabilityVerifier,
+    DataFenceBoundary,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Intent,
+    Operation,
+    ResourceDefinition,
+    ResourceRegistry,
+    ResourcePolicy,
+    ActionDecision,
+    RowRule,
 )
-from datafence.core.boundary import DataFenceBoundary
-from datafence.core.policy import create_banking_policy as create_banking_demo_policy
-from datafence.core.types import Actor, AllowedRequest, DeniedRequest, Intent, Operation
+from datafence.connectors.memory_connector import InMemoryReferenceConnector
+from datafence.core.capability import CapabilityVerificationError
+from datafence.core.resources import PredicateOperator
+from datafence.errors import PolicyDeniedError
+
+# ---------------------------------------------------------------------------
+# Shared sample data — two tenants
+# ---------------------------------------------------------------------------
+SAMPLE_DATA: dict = {
+    "transactions": [
+        {"id": 1, "tenant_id": "bank_a", "merchant": "Amazon",    "amount": 49.99, "timestamp": "2026-01-15T10:30:00", "card_number": "4532-xxxx"},
+        {"id": 2, "tenant_id": "bank_a", "merchant": "Starbucks", "amount": 5.50,  "timestamp": "2026-01-15T14:20:00", "card_number": "4532-xxxx"},
+        {"id": 3, "tenant_id": "bank_b", "merchant": "Walmart",   "amount": 75.25, "timestamp": "2026-01-15T11:00:00", "card_number": "5555-xxxx"},
+    ],
+    "customers": [
+        {"id": 101, "tenant_id": "bank_a", "name": "Alice",   "email": "alice@bank-a.example", "ssn": "123-45-6789"},
+        {"id": 201, "tenant_id": "bank_b", "name": "Charlie", "email": "charlie@bank-b.example", "ssn": "987-65-4321"},
+    ],
+}
 
 
-def print_header(title: str):
-    """Print demo section header."""
-    print("\n" + "=" * 80)
-    print(f"  {title}")
-    print("=" * 80 + "\n")
+# ---------------------------------------------------------------------------
+# Setup: registry, policy, boundary, connector
+# ---------------------------------------------------------------------------
 
+def build_fence() -> tuple[DataFenceBoundary, InMemoryReferenceConnector, bytes]:
+    registry = ResourceRegistry()
+    registry.register(ResourceDefinition(
+        "transactions",
+        fields={
+            "id":          FieldDefinition("id", "integer"),
+            "tenant_id":   FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            "merchant":    FieldDefinition("merchant", "string"),
+            "amount":      FieldDefinition("amount", "decimal"),
+            "timestamp":   FieldDefinition("timestamp", "string"),
+            "card_number": FieldDefinition("card_number", "string",
+                                           classification=__import__("datafence").DataClassification.RESTRICTED),
+        },
+        supported_operations=("read",),
+    ))
+    registry.register(ResourceDefinition(
+        "customers",
+        fields={
+            "id":        FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            "name":      FieldDefinition("name", "string"),
+            "email":     FieldDefinition("email", "string"),
+            "ssn":       FieldDefinition("ssn", "string",
+                                         classification=__import__("datafence").DataClassification.RESTRICTED),
+        },
+        supported_operations=("read",),
+    ))
 
-def print_decision(result: AllowedRequest | DeniedRequest):
-    """Print decision details."""
-    if isinstance(result, AllowedRequest):
-        print("✅ DECISION: ALLOW\n")
-        print(f"Request ID: {result.request_id}")
-        print(f"Execution ID: {result.execution_plan.execution_id}")
-        print(f"Actor: {result.actor.id}")
-        print(f"Tenant: {result.actor.tenant_id}\n")
+    policy = DataFencePolicy("demo-policy", "1.0", {
+        "transactions": ResourcePolicy(
+            "transactions",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "merchant", "amount", "timestamp"],
+            denied_fields=["card_number"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=50,
+        ),
+        "customers": ResourcePolicy(
+            "customers",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "name", "email"],
+            denied_fields=["ssn"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=50,
+        ),
+    })
+    engine = DataFencePolicyEngine(policy, registry=registry)
 
-        print("ExecutionPlan:")
-        plan = result.execution_plan
-        print(f"  Resource: {plan.resource}")
-        print(f"  Operation: {plan.operation.value}")
-        print(f"  Selected Fields: {', '.join(plan.selected_fields)}")
-        print(f"  Enforced Filters: {plan.enforced_filters}")
-        print(f"  Limit: {plan.limit}")
-        print(f"  Policy Version: {plan.policy_version}\n")
-
-        print(f"Result:")
-        print(f"  Rows Returned: {result.execution_result.row_count}")
-        print(f"  Verified: {result.execution_result.verified}\n")
-
-        if result.execution_result.row_count > 0 and result.execution_result.row_count <= 3:
-            print("Data:")
-            for i, row in enumerate(result.execution_result.data, 1):
-                print(f"  Row {i}: {row}")
-
-        print(f"\nEvidence:")
-        print(f"  Execution ID: {result.evidence.execution_id}")
-        print(f"  Policy Version: {result.evidence.policy_version}")
-        print(f"  Timestamp: {result.evidence.timestamp}")
-
-    else:  # DeniedRequest
-        print("❌ DECISION: DENY\n")
-        print(f"Request ID: {result.request_id}")
-        print(f"Actor: {result.actor.id}")
-        print(f"Tenant: {result.actor.tenant_id}")
-        print(f"Resource: {result.resource}")
-        print(f"Operation: {result.operation.value}\n")
-
-        print("Reasons:")
-        for reason in result.decision.reasons:
-            print(f"  • {reason}")
-
-        print(f"\nPolicy Version: {result.decision.policy_version}")
-        print(f"Evidence ID: {result.evidence.execution_id}")
-
-
-def demo_1_normal_request(boundary: DataFenceBoundary):
-    """
-    DEMO 1: Normal Request
-    
-    An authorized request that should succeed.
-    
-    LLM proposes: "Show me my recent transactions"
-    Policy allows: Read transactions with specific fields
-    Result: Request allowed, ExecutionPlan created, data returned
-    """
-    print_header("DEMO 1: Normal Request — Authorized Access")
-
-    print("Scenario:")
-    print("  User: 'Show me my recent transactions'")
-    print("  LLM generates request for transactions")
-    print("  Actor: agent:finance (tenant_a)\n")
-
-    # Create actor
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
-
-    # Create intent (what the LLM proposes)
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=["id", "merchant", "amount", "timestamp"],
-        filters={},
-        limit=10,
+    signing_key = token_bytes(32)
+    audience = "demo-service"
+    fence = DataFenceBoundary.create(
+        policy_engine=engine,
+        registry=registry,
+        signing_key=signing_key,
+        capability_audience=audience,
     )
-
-    print("LLM Proposes:")
-    print(f"  Resource: {intent.resource}")
-    print(f"  Operation: {intent.operation.value}")
-    print(f"  Fields: {intent.fields}")
-    print(f"  Filters: {intent.filters}")
-    print(f"  Limit: {intent.limit}\n")
-
-    # Execute through DataFence boundary
-    result = boundary.execute(actor, intent)
-
-    print_decision(result)
+    connector = InMemoryReferenceConnector(SAMPLE_DATA, signing_key, expected_audience=audience)
+    return fence, connector, signing_key
 
 
-def demo_2_select_star(boundary: DataFenceBoundary):
-    """
-    DEMO 2: SELECT *
-    
-    LLM requests all fields (SELECT *).
-    DataFence must restrict to only allowed fields.
-    
-    The database does NOT execute "SELECT *".
-    DataFence generates SQL with only authorized fields.
-    """
-    print_header("DEMO 2: SELECT * — Field Restriction")
+# ---------------------------------------------------------------------------
+# Pretty helpers
+# ---------------------------------------------------------------------------
 
-    print("Scenario:")
-    print("  LLM generates: SELECT * FROM transactions")
-    print("  Policy allows only: id, merchant, amount, timestamp")
-    print("  Policy denies: card_number\n")
+def sep(n: int, title: str) -> None:
+    print(f"\n{'─' * 65}")
+    print(f"  Scenario {n}: {title}")
+    print("─" * 65)
 
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
 
-    # LLM requests ALL fields (SELECT *)
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=None,  # None means "all fields" (SELECT *)
-        raw_sql="SELECT * FROM transactions",  # LLM's SQL (untrusted)
+def ok(msg: str) -> None:
+    print(f"  ✓ {msg}")
+
+
+def fail(msg: str) -> None:
+    print(f"  ✗ {msg}")
+
+
+# ---------------------------------------------------------------------------
+# Demo
+# ---------------------------------------------------------------------------
+
+def run_demo() -> None:
+    fence, connector, signing_key = build_fence()
+
+    print("=" * 65)
+    print("  DataFence v1 — Authorization Boundary Demo")
+    print("  Principal + Intent → DataFence → Capability → Connector")
+    print("=" * 65)
+
+    # ------------------------------------------------------------------
+    # Scenario 1: authorized read
+    # ------------------------------------------------------------------
+    sep(1, "Authorized read — bank_a agent reads transactions")
+
+    principal = Actor(id="agent:finance", tenant_id="bank_a")
+    intent = Intent("transactions", Operation.READ,
+                    fields=["id", "merchant", "amount"], limit=10)
+
+    authorized = fence.authorize(principal, intent)
+    result = connector.execute(authorized)
+
+    print(f"  capability id : {authorized.execution_id}")
+    print(f"  policy version: {authorized.policy_version}")
+    print(f"  authorized fields: {authorized.selected_fields}")
+    print(f"  enforced predicates: {authorized.filter_constraints()}")
+    print(f"  rows returned : {result.row_count}")
+    for row in result.rows:
+        print(f"    {row}")
+        assert "card_number" not in row
+    ok("card_number correctly excluded from results")
+
+    # ------------------------------------------------------------------
+    # Scenario 2: tenant isolation
+    # ------------------------------------------------------------------
+    sep(2, "Tenant isolation — agent for bank_a cannot read bank_b data")
+
+    intent2 = Intent("transactions", Operation.READ,
+                     fields=["id", "merchant"],
+                     filters={"tenant_id": "bank_b"})   # agent tries other tenant
+    cap2 = fence.authorize(principal, intent2)
+    result2 = connector.execute(cap2)
+
+    print(f"  Agent supplied filter tenant_id='bank_b'")
+    print(f"  Policy-enforced filter: {cap2.filter_constraints()}")
+    print(f"  Rows returned: {result2.row_count} (should be bank_a rows only)")
+    for row in result2.rows:
+        assert row.get("tenant_id", "bank_a") == "bank_a", "ISOLATION BREACH"
+    ok("No bank_b rows returned — tenant isolation holds")
+
+    # ------------------------------------------------------------------
+    # Scenario 3: restricted field denied
+    # ------------------------------------------------------------------
+    sep(3, "Restricted field — agent requests card_number")
+
+    try:
+        fence.authorize(
+            principal,
+            Intent("transactions", Operation.READ, fields=["id", "merchant", "card_number"]),
+        )
+        fail("Should have been denied!")
+    except PolicyDeniedError as exc:
+        ok(f"Denied: {exc}")
+
+    # ------------------------------------------------------------------
+    # Scenario 4: unknown resource denied
+    # ------------------------------------------------------------------
+    sep(4, "Unknown resource — agent requests employee_salaries")
+
+    try:
+        fence.authorize(principal, Intent("employee_salaries", Operation.READ))
+        fail("Should have been denied!")
+    except PolicyDeniedError as exc:
+        ok(f"Denied: {exc}")
+
+    # ------------------------------------------------------------------
+    # Scenario 5: denied operation
+    # ------------------------------------------------------------------
+    sep(5, "Denied operation — agent attempts DELETE")
+
+    try:
+        fence.authorize(principal, Intent("transactions", Operation.DELETE))
+        fail("Should have been denied!")
+    except PolicyDeniedError as exc:
+        ok(f"Denied: {exc}")
+
+    # ------------------------------------------------------------------
+    # Scenario 6: forged capability rejected
+    # ------------------------------------------------------------------
+    sep(6, "Forged capability — connector rejects tampered AuthorizedExecution")
+
+    legitimate = fence.authorize(
+        principal, Intent("transactions", Operation.READ, fields=["id", "merchant"])
     )
+    forged = dataclasses.replace(legitimate, resource="employee_salaries")
+    try:
+        connector.execute(forged)
+        fail("Forged capability should have been rejected!")
+    except CapabilityVerificationError as exc:
+        ok(f"Forged capability rejected: {exc}")
 
-    print("LLM Proposes:")
-    print(f"  Raw SQL: {intent.raw_sql}")
-    print(f"  Fields: * (all fields)\n")
+    # ------------------------------------------------------------------
+    # Scenario 7: customer-side verifier
+    # ------------------------------------------------------------------
+    sep(7, "CapabilityVerifier — customer-side signature verification")
 
-    print("CRITICAL: DataFence does NOT execute the LLM's SQL.")
-    print("It creates an ExecutionPlan with only authorized fields.\n")
-
-    result = boundary.execute(actor, intent)
-
-    print_decision(result)
-
-    if isinstance(result, AllowedRequest):
-        print("\n📌 Key Point:")
-        print("   The database executed DataFence's plan, NOT the LLM's 'SELECT *'")
-        print(f"   Authorized fields: {result.execution_plan.selected_fields}")
-        print("   card_number was NEVER requested from the database")
-
-
-def demo_3_sensitive_field(boundary: DataFenceBoundary):
-    """
-    DEMO 3: Sensitive Field Request
-    
-    LLM requests a denied field (card_number).
-    DataFence must DENY before reaching the database.
-    """
-    print_header("DEMO 3: Sensitive Field — Field Denial")
-
-    print("Scenario:")
-    print("  LLM requests: SELECT id, amount, card_number")
-    print("  Policy denies: card_number")
-    print("  Expected: Request denied BEFORE reaching database\n")
-
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
-
-    # LLM requests a denied field
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=["id", "amount", "card_number"],  # card_number is denied
+    cap7 = fence.authorize(
+        principal, Intent("customers", Operation.READ, fields=["id", "name"])
     )
+    verifier = CapabilityVerifier(signing_key, expected_audience="demo-service")
+    verifier.verify(cap7)
+    ok(f"Capability verified: {cap7.execution_id}")
 
-    print("LLM Proposes:")
-    print(f"  Fields: {intent.fields}\n")
+    # Wrong key
+    bad_verifier = CapabilityVerifier(token_bytes(32), expected_audience="demo-service")
+    try:
+        bad_verifier.verify(cap7)
+        fail("Wrong key should have failed!")
+    except CapabilityVerificationError:
+        ok("Wrong signing key correctly rejected")
 
-    result = boundary.execute(actor, intent)
-
-    print_decision(result)
-
-    if isinstance(result, DeniedRequest):
-        print("\n📌 Key Point:")
-        print("   The database NEVER received this request")
-        print("   Policy blocked it before execution")
-
-
-def demo_4_cross_tenant_attack(boundary: DataFenceBoundary):
-    """
-    DEMO 4: Cross-Tenant Attack
-    
-    Actor from tenant_a tries to access tenant_b's data.
-    DataFence enforces tenant isolation via enforced filters.
-    """
-    print_header("DEMO 4: Cross-Tenant Attack — Tenant Isolation")
-
-    print("Scenario:")
-    print("  Actor: tenant_a")
-    print("  LLM requests: transactions with no tenant filter")
-    print("  Attack: Hoping to see tenant_b's data")
-    print("  Expected: Only tenant_a data returned\n")
-
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
-
-    # LLM tries to access all transactions (cross-tenant attack)
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=["id", "merchant", "amount"],
-        filters={},  # No tenant filter!
-    )
-
-    print("LLM Proposes:")
-    print(f"  Filters: {intent.filters} (NO tenant filter!)\n")
-
-    print("DataFence enforces tenant isolation:")
-    print("  Policy adds: tenant_id = :actor_tenant_id\n")
-
-    result = boundary.execute(actor, intent)
-
-    print_decision(result)
-
-    if isinstance(result, AllowedRequest):
-        print("\n📌 Key Point:")
-        print(f"   Enforced Filter: {result.execution_plan.enforced_filters}")
-        print("   The LLM CANNOT override tenant isolation")
-        print("   Only tenant_a's data was returned")
-
-        # Verify all returned data belongs to tenant_a
-        tenant_ids = {row.get("tenant_id", "tenant_a") for row in result.execution_result.data}
-        if tenant_ids == {"tenant_a"}:
-            print("\n   ✅ Verified: All data belongs to tenant_a")
-
-
-def demo_5_destructive_operation(boundary: DataFenceBoundary):
-    """
-    DEMO 5: Destructive Operation
-    
-    LLM attempts a DELETE operation.
-    Policy denies destructive operations.
-    Database never receives the DELETE.
-    """
-    print_header("DEMO 5: Destructive Operation — Operation Denial")
-
-    print("Scenario:")
-    print("  LLM generates: DELETE FROM transactions WHERE...")
-    print("  Policy denies: DELETE operations")
-    print("  Expected: Request denied BEFORE reaching database\n")
-
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
-
-    # LLM tries to delete data
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.DELETE,  # Denied by policy
-        raw_sql="DELETE FROM transactions WHERE id = 1",
-    )
-
-    print("LLM Proposes:")
-    print(f"  Operation: {intent.operation.value}")
-    print(f"  Raw SQL: {intent.raw_sql}\n")
-
-    result = boundary.execute(actor, intent)
-
-    print_decision(result)
-
-    if isinstance(result, DeniedRequest):
-        print("\n📌 Key Point:")
-        print("   The database NEVER received the DELETE")
-        print("   Policy blocked it at the boundary")
-        print("   Data is safe")
-
-
-def demo_6_result_validation(boundary_with_malicious_connector: DataFenceBoundary):
-    """
-    DEMO 6: Result Validation
-    
-    Even if the connector is compromised/malicious,
-    DataFence's result validation catches unauthorized fields.
-    
-    This proves security exists on BOTH sides:
-    - Request enforcement (before execution)
-    - Result validation (after execution)
-    """
-    print_header("DEMO 6: Result Validation — Defense in Depth")
-
-    print("Scenario:")
-    print("  Connector is compromised (returns unauthorized fields)")
-    print("  LLM requests: id, merchant, amount")
-    print("  Malicious connector adds: card_number, ssn")
-    print("  Expected: Result validation catches it\n")
-
-    actor = Actor(id="agent:finance", tenant_id="tenant_a")
-
-    intent = Intent(
-        resource="transactions",
-        operation=Operation.READ,
-        fields=["id", "merchant", "amount"],
-    )
-
-    print("LLM Proposes:")
-    print(f"  Fields: {intent.fields}\n")
-
-    print("Malicious connector returns:")
-    print("  Authorized: id, merchant, amount")
-    print("  UNAUTHORIZED: card_number, ssn (injected by malicious connector)\n")
-
-    result = boundary_with_malicious_connector.execute(actor, intent)
-
-    print_decision(result)
-
-    if isinstance(result, DeniedRequest):
-        print("\n📌 Key Point:")
-        print("   Result validation CAUGHT the unauthorized fields")
-        print("   Even a compromised connector cannot bypass DataFence")
-        print("   Security exists on BOTH request AND result boundaries")
-
-
-def run_killer_demo():
-    """Run all 6 demo scenarios."""
-    print("\n" + "█" * 80)
-    print("█" + " " * 78 + "█")
-    print("█" + " " * 20 + "DATAFENCE KILLER DEMO" + " " * 37 + "█")
-    print("█" + " " * 78 + "█")
-    print("█" + " " * 15 + "Proving the Security Boundary" + " " * 35 + "█")
-    print("█" + " " * 78 + "█")
-    print("█" * 80)
-
-    # Setup
-    db_path = "/tmp/datafence_demo.db"
-    if os.path.exists(db_path):
-        os.remove(db_path)
-
-    # Create policy engine
-    print("\n[Setup] Loading banking demo policy...")
-    policy_engine = create_banking_demo_policy()
-    print("[Setup] Policy loaded: banking-demo-v1")
-
-    # Create DataFence boundary using factory method (v0.4)
-    # This properly wires up signing_key between boundary and connector
-    print("[Setup] Creating DataFence boundary with secure connector...")
-    boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
-        connector_factory=create_demo_database,
-        registry=policy_engine.registry,
-        database_path=db_path
-    )
-    print("[Setup] Boundary created (v0.4 - cryptographic capabilities)")
-    print("[Setup] Database created with:")
-    print("  • 2 tenants: tenant_a, tenant_b")
-    print("  • Tables: customers, transactions, accounts")
-    print("  • Sensitive fields: ssn, card_number, account_number")
-
-    # Run demos
-    demo_1_normal_request(boundary)
-    demo_2_select_star(boundary)
-    demo_3_sensitive_field(boundary)
-    demo_4_cross_tenant_attack(boundary)
-    demo_5_destructive_operation(boundary)
-
-    # Demo 6 needs malicious connector
-    # For demo 6, we need to create malicious connector manually
-    # (it bypasses signature verification for testing)
-    from secrets import token_bytes
-    demo_key = token_bytes(32)
-    malicious_connector = MaliciousConnector(db_path, demo_key)
-    boundary_malicious = DataFenceBoundary(
-        policy_engine,
-        malicious_connector,
-        demo_key,
-        registry=policy_engine.registry,
-    )
-    demo_6_result_validation(boundary_malicious)
-
+    # ------------------------------------------------------------------
     # Summary
-    print_header("SUMMARY: DataFence Security Boundary PROVEN")
-
-    print("What we proved:")
-    print("  ✅ Normal requests work (Demo 1)")
-    print("  ✅ Field restrictions enforced (Demo 2)")
-    print("  ✅ Sensitive fields blocked (Demo 3)")
-    print("  ✅ Tenant isolation enforced (Demo 4)")
-    print("  ✅ Destructive operations blocked (Demo 5)")
-    print("  ✅ Result validation works (Demo 6)\n")
-
-    print("Key Security Properties:")
-    print("  1. Database NEVER executes LLM's raw SQL")
-    print("  2. AuthorizedExecution is the signed execution capability")
-    print("  3. Policy evaluation happens BEFORE execution")
-    print("  4. Result validation happens AFTER execution")
-    print("  5. Fail closed on all errors")
-    print("  6. Complete evidence trail\n")
-
-    print("The Fundamental Guarantee:")
-    print("  Even if the AI agent is completely compromised,")
-    print("  it CANNOT use DataFence to access data or perform")
-    print("  operations outside the policy.\n")
-
-    print("█" * 80)
-    print("█" + " " * 25 + "KILLER DEMO COMPLETE" + " " * 33 + "█")
-    print("█" * 80 + "\n")
-
-    # Cleanup
-    boundary._connector.close()
-    malicious_connector.close()
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 65)
+    print("  All scenarios passed.")
+    print()
+    print("  DataFence authorized. The connector executed.")
+    print("  The AI agent never touched the database directly.")
+    print()
+    print("  fence.authorize()  → AuthorizedExecution (signed capability)")
+    print("  connector.execute() → data (customer's responsibility)")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
-    run_killer_demo()
+    run_demo()

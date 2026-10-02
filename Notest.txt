@@ -1,3 +1,0 @@
-LLMs decide what should happen. Your library decides what is actually allowed to happen to the data.
-AI doesn't need to be trusted. The operation does.
-AI can be probabilistic. Data access doesn't have to be.

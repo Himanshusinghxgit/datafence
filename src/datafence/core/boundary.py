@@ -37,9 +37,10 @@ from uuid import uuid4
 from datafence.core.capability import AuthorizedExecution
 from datafence.core.policy import PolicyDecision as EnginePolicyDecision
 from datafence.core.policy import PolicyEffect
+from datafence.core.principal import Principal as Actor
 from datafence.core.registry import ResourceRegistry
 from datafence.core.resources import Filter
-from datafence.core.types import Actor, Intent, Request
+from datafence.core.types import Intent, Request
 from datafence.errors import PolicyDeniedError, PolicyError
 
 
@@ -127,18 +128,19 @@ class DataFenceBoundary:
     # ------------------------------------------------------------------
 
     def authorize(self, principal: Actor, intent: Intent) -> AuthorizedExecution:
-        """Authorize an intent and return a signed backend capability.
+        """Authorize an intent and return a signed authorization capability.
 
         This is the *only* public method on DataFenceBoundary.
-        No connector is constructed or invoked here.
+        No connector is constructed or invoked here. DataFence does not
+        execute enterprise data operations.
 
         The returned AuthorizedExecution must be passed to the customer's
-        existing backend connector, which verifies the signature before
-        executing the operation.
+        own backend connector, which verifies the signature before executing
+        the operation against the customer's data source.
 
         Args:
             principal : Authenticated principal from the application auth layer.
-                        The LLM must never be able to choose or modify this.
+                        The LLM/agent must never be able to choose or modify this.
             intent    : Untrusted request from an AI agent or application.
 
         Returns:

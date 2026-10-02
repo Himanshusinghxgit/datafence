@@ -1,99 +1,198 @@
 # DataFence
 
-**Deterministic authorization boundary for AI agents accessing enterprise data.**
+**Deterministic authorization boundary for AI/agent access to enterprise data.**
 
-The model proposes. DataFence decides. The customer's backend executes.
-
----
-
-## What is DataFence?
-
-DataFence is a security boundary you place between an AI agent and your
-existing data-access layer. It authorizes what the AI may access and returns
-a signed capability. Your existing connector verifies the capability and
-executes the operation.
-
-DataFence works for banks, healthcare, SaaS, retail, government, and any
-enterprise where AI agents need controlled access to data.
-
-## The Problem
-
-Without a boundary:
-
-```
-LLM → "SELECT * FROM customers" → database
-```
-
-The LLM is not an authorization authority. It cannot be trusted to respect
-tenant isolation, field-level restrictions, or operation limits.
-
-## The Solution
-
-```
-LLM
- │  Intent (untrusted)
- ▼
-DataFence
- │  ResourceRegistry → Policy → Authorization
- ▼
-AuthorizedExecution (HMAC-signed)
- │
- ▼
-Your existing connector
- │  verify + execute
- ▼
-Enterprise data
-```
-
-DataFence does not know or care what database you use. It authorizes.
-Your connector executes.
+> **The AI proposes. DataFence decides. Your application executes.**
 
 ---
 
-## What DataFence Owns
+## The problem
 
-| Component | Responsibility |
-|-----------|---------------|
-| `ResourceRegistry` | WHAT resources exist, WHAT fields, WHAT classifications |
-| `DataFencePolicyEngine` | WHO can do WHAT, on WHICH rows, with WHAT limits |
-| `DataFenceBoundary` | Authorization + HMAC-signed capability issuance |
-| `CapabilityVerifier` | Customer-side signature verification |
+AI systems are probabilistic. Enterprise authorization cannot be probabilistic.
 
-## What Your Application Owns
+When an AI agent requests access to enterprise data, you cannot trust it to:
 
-| Component | Responsibility |
-|-----------|---------------|
-| Authentication | Producing the `Actor` / `Principal` |
-| AI/LLM | Generating the `Intent` (untrusted input) |
-| Connector | Verifying the capability + executing the operation |
-| Database | Storage, connections, credentials |
-| Infrastructure | Hosting, networking, secrets management |
+- Choose its own identity
+- Determine which tenant's data it can see
+- Decide which fields are sensitive
+- Honor row-level isolation rules
+
+You need a deterministic enforcement point between the AI and your data.
+
+That is DataFence.
 
 ---
 
-## Quickstart
+## How it works
+
+```
+Authentication (your app)
+        ↓
+   Principal  ←── trusted identity
+        +
+    Intent    ←── untrusted AI request
+        ↓
+  DataFenceBoundary.authorize()
+        ├─ ResourceRegistry — does this resource/field exist?
+        ├─ PolicyEngine     — is this principal allowed?
+        └─ AuthorizedExecution (HMAC-signed)
+                ↓
+    your_connector.execute(authorized)   ← you own this
+                ↓
+        Enterprise data
+```
+
+DataFence **stops at `AuthorizedExecution`**. It does not own the connector, the database, the credentials, or the query execution. Your application does.
+
+---
+
+## Core concepts
+
+### Principal
+
+Who is making the request? The authenticated identity from **your** auth system.
+
+```python
+from datafence import Principal
+
+principal = Principal(
+    id="user:alice",
+    tenant_id="acme-corp",
+    roles=("finance:read",),
+    attributes={"department": "finance"},
+)
+```
+
+The AI cannot choose or modify the Principal. Your application sets it.
+
+### Intent
+
+What does the AI/agent want? An untrusted request.
+
+```python
+from datafence import Intent, Operation
+
+intent = Intent(
+    resource="orders",
+    operation=Operation.READ,
+    fields=["id", "total", "status"],
+    limit=10,
+)
+```
+
+Intent is **untrusted**. DataFence validates and authorizes it.
+
+### ResourceRegistry
+
+What resources exist and what are their schemas?
+
+```python
+from datafence import ResourceRegistry, ResourceDefinition, FieldDefinition, DataClassification
+
+registry = ResourceRegistry()
+registry.register(ResourceDefinition(
+    name="orders",
+    fields={
+        "id":        FieldDefinition("id", "integer"),
+        "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        "total":     FieldDefinition("total", "decimal", DataClassification.CONFIDENTIAL),
+        "ssn":       FieldDefinition("ssn", "string", DataClassification.RESTRICTED),
+    },
+))
+```
+
+The registry defines **what exists**. The policy defines **who can access it**.
+
+### Policy
+
+Who can do what, to which resource, under what constraints?
+
+```python
+from datafence import DataFencePolicy, DataFencePolicyEngine, ResourcePolicy, ActionDecision, RowRule
+from datafence.core.resources import PredicateOperator
+
+policy = DataFencePolicy("my-policy", "1.0", {
+    "orders": ResourcePolicy(
+        "orders",
+        actions={"read": ActionDecision.ALLOW},
+        allowed_fields=["id", "tenant_id", "total", "status"],
+        denied_fields=["ssn"],
+        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+        max_rows=100,
+    )
+})
+engine = DataFencePolicyEngine(policy, registry=registry)
+```
+
+Row filters are **injected by policy**, not supplied by the AI. The AI cannot override them.
+
+Policies can also be loaded from YAML:
+
+```python
+from datafence import YAMLPolicyLoader
+policy = YAMLPolicyLoader.load("policies/my-policy.yaml")
+```
+
+### DataFenceBoundary
+
+The authorization boundary. The only method you call is `authorize()`.
+
+```python
+from secrets import token_bytes
+from datafence import DataFenceBoundary
+
+key = token_bytes(32)   # secret — keep it safe
+fence = DataFenceBoundary.create(engine, registry, key)
+```
+
+### AuthorizedExecution
+
+The output of `authorize()`. A cryptographically signed proof that DataFence explicitly authorized this operation.
+
+```python
+authorized = fence.authorize(principal, intent)
+
+print(authorized.execution_id)       # unique authorization ID
+print(authorized.selected_fields)    # fields actually authorized
+print(authorized.filter_constraints()) # predicates to enforce
+print(authorized.limit)              # row limit (policy-capped)
+```
+
+Your connector verifies the signature before executing:
+
+```python
+from datafence import CapabilityVerifier
+
+verifier = CapabilityVerifier(key, expected_audience="my-service")
+verifier.verify(authorized)   # raises CapabilityVerificationError on failure
+```
+
+---
+
+## Quick start
 
 ```python
 from secrets import token_bytes
 from datafence import (
-    Actor, DataFenceBoundary, DataFencePolicyEngine, DataFencePolicy,
+    Principal, Intent, Operation,
+    DataFenceBoundary, DataFencePolicyEngine, DataFencePolicy,
     ResourcePolicy, ActionDecision, RowRule,
-    ResourceRegistry, ResourceDefinition, FieldDefinition, DataClassification,
-    Intent, Operation, CapabilityVerifier,
+    ResourceRegistry, ResourceDefinition, FieldDefinition,
+    CapabilityVerifier,
 )
 from datafence.core.resources import PredicateOperator
 
-# 1. Define WHAT resources exist (Registry)
+# 1. Build the registry (what exists)
 registry = ResourceRegistry()
 registry.register(ResourceDefinition("orders", fields={
     "id":        FieldDefinition("id", "integer"),
     "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-    "total":     FieldDefinition("total", "decimal", DataClassification.CONFIDENTIAL),
+    "total":     FieldDefinition("total", "decimal"),
     "status":    FieldDefinition("status", "string"),
 }))
 
-# 2. Define WHO can do WHAT (Policy)
-policy = DataFencePolicy("orders-policy", "1.0", {
+# 2. Define the policy (who can do what)
+policy = DataFencePolicy("orders-v1", "1.0", {
     "orders": ResourcePolicy(
         "orders",
         actions={"read": ActionDecision.ALLOW},
@@ -105,126 +204,98 @@ policy = DataFencePolicy("orders-policy", "1.0", {
 engine = DataFencePolicyEngine(policy, registry=registry)
 
 # 3. Create the boundary
-signing_key = token_bytes(32)   # keep secret; share with your connector
-fence = DataFenceBoundary.create(engine, registry, signing_key)
+key = token_bytes(32)
+fence = DataFenceBoundary.create(engine, registry, key)
 
-# 4. Authorize (DataFence decides)
+# 4. Authorize — DataFence decides
 authorized = fence.authorize(
-    Actor("user:alice", "tenant-acme"),            # from your auth layer
-    Intent("orders", Operation.READ,               # from the AI agent
-           fields=["id", "total", "status"]),
+    Principal("user:alice", "acme"),
+    Intent("orders", Operation.READ, fields=["id", "total", "status"]),
 )
 
-# 5. Pass to your connector (your code, your database)
-CapabilityVerifier(signing_key).verify(authorized)
-result = my_connector.execute(authorized)
+# 5. Verify and execute — you decide how
+CapabilityVerifier(key).verify(authorized)
+rows = my_connector.execute(authorized)   # your code, your database
 ```
 
 ---
 
-## YAML Policy
+## What DataFence does NOT do
 
-Policies can also be loaded from YAML:
-
-```yaml
-name: orders-policy
-version: "1.0"
-resources:
-  orders:
-    actions:
-      read: allow
-      insert: deny
-      update: deny
-      delete: deny
-    fields:
-      allow: [id, tenant_id, total, status, created_at]
-      deny: []
-    rows:
-      - field: tenant_id
-        operator: eq
-        value: ":actor_tenant_id"
-    limits:
-      rows: 100
-    obligations:
-      audit: true
-```
-
-```python
-from datafence import YAMLPolicyLoader, DataFencePolicyEngine
-
-policy = YAMLPolicyLoader.load("policies/orders.yaml")
-engine = DataFencePolicyEngine(policy, registry=registry)
-```
+- Execute database queries
+- Own database connections or credentials
+- Authenticate users
+- Replace your IAM/SSO layer
+- Generate SQL
+- Access your data
+- Know what's in your database
 
 ---
 
-## CLI
+## Optional adapters
 
-```bash
-# Generate a sample policy
-datafence init --output policy.yaml
+DataFence ships adapters that feed requests into the authorization boundary from:
 
-# Validate a policy file
-datafence validate policy.yaml --verbose
+| Adapter | Module |
+|---------|--------|
+| REST API (FastAPI) | `datafence.api` |
+| CLI | `datafence.cli` |
+| OpenAI function calling | `datafence.integrations.openai_tool` |
+| Anthropic Claude tool-use | `datafence.integrations.anthropic_tool` |
+| LangChain | `datafence.integrations.langchain_tool` |
+| MCP | `datafence.mcp` |
 
-# Describe a resource in a policy
-datafence describe policy.yaml --resource orders
-```
+These adapters feed `Principal + Intent` into `DataFenceBoundary.authorize()`. They do not redefine the core architecture.
 
 ---
 
-## Install
+## Reference connector implementations
+
+For tests and demonstrations, `examples/reference_connector/` contains reference implementations for:
+
+- In-memory (always available, no dependencies)
+- SQLite
+- PostgreSQL
+- Snowflake
+- AWS Athena
+
+These are **examples only**. For production, implement the `DataConnector` protocol in your own codebase.
+
+---
+
+## Installation
 
 ```bash
 pip install datafence
-
-# Optional extras
-pip install "datafence[postgres]"    # PostgreSQL reference connector
-pip install "datafence[api]"         # FastAPI REST adapter
-pip install "datafence[cli]"         # CLI tool
-pip install "datafence[integrations]"# OpenAI, Anthropic, LangChain adapters
 ```
 
----
+Optional dependencies:
 
-## Security Properties
-
-- **Fail-closed**: Every unknown resource, field, or operation is denied.
-- **Lossless predicates**: `amount > 1000` never becomes `amount = 1000`.
-- **HMAC-signed capabilities**: Tampering with any field invalidates the signature.
-- **Tenant isolation**: Policy-injected row filters cannot be overridden by the LLM.
-- **Audience binding**: A capability for service A is rejected by service B.
-- **Immutable**: `Actor`, `Intent`, and `AuthorizedExecution` are frozen after creation.
-
-See [SECURITY.md](SECURITY.md) and [docs/threat-model.md](docs/threat-model.md)
-for the full security model.
-
----
-
-## What DataFence is NOT
-
-- Not an IAM replacement
-- Not a database driver or ORM
-- Not a SQL firewall
-- Not a DLP system
-- Not a WAF
-- Not a compliance certification (GDPR, HIPAA, PCI)
-- Not a hallucination or prompt-injection detector
-
-It can complement all of those.
+```bash
+pip install 'datafence[api]'           # FastAPI REST adapter
+pip install 'datafence[cli]'           # CLI tool
+pip install 'datafence[integrations]'  # OpenAI, Anthropic, LangChain
+```
 
 ---
 
 ## Examples
 
-- [`examples/basic/`](examples/basic/README.md) — primary quickstart with generic resources
-- [`examples/bank/`](examples/bank/README.md) — banking domain example built on DataFence core
+```bash
+# Minimal generic example (no database required)
+python -m examples.basic.application
 
-## Documentation
+# Banking domain example
+python -m examples.bank.app
+```
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — component design and ownership model
-- [`SECURITY.md`](SECURITY.md) — security properties and limitations
-- [`docs/threat-model.md`](docs/threat-model.md) — threat model
+---
+
+## Architecture
+
+See [`docs/architecture.md`](docs/architecture.md) for the full security model and design rationale.
+
+---
 
 ## License
 

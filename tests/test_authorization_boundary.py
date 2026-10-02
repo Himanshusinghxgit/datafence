@@ -11,6 +11,7 @@ from datafence import (
     DataFenceBoundary,
     Intent,
     Operation,
+    Principal,
 )
 from datafence.core.capability import CapabilityVerificationError
 from datafence.core.policy import (

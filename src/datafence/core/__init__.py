@@ -1,1 +1,1 @@
-"""Core DataFence functionality."""
+"""DataFence core authorization components."""

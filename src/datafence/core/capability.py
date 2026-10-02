@@ -44,7 +44,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from datafence.core.types import Actor, Operation
+from datafence.core.principal import Principal as Actor  # Actor alias for capability fields
+from datafence.core.types import Operation
 
 
 def _lp(s: str) -> str:

@@ -1,8 +1,8 @@
 """
-DataFence Anthropic/Claude tool-use adapter (Phase 7).
+DataFence Anthropic/Claude tool-use adapter.
 
-Exposes a DataFenceBoundary as a Claude tool so Claude models can query
-data through a properly authorized execution boundary.
+Exposes a DataFenceBoundary as a Claude tool so Claude models can request
+data access through a properly authorized boundary.
 
 Architecture::
 
@@ -10,35 +10,48 @@ Architecture::
         │  tool_use block: {"name": "datafence_query", "input": {...}}
         ▼
     DataFenceAnthropicTool.handle_call(principal, tool_input)
-        │  constructs Intent
+        │  constructs Intent (untrusted)
         ▼
-    DataFenceBoundary.execute(principal, intent)
-        │  policy → capability → connector → validation
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
         ▼
-    tool_result block (str JSON)
+    JSON tool_result describing the capability
+        │
+        ▼  (caller passes capability to their own connector)
+    Customer-owned connector → database
+
+Security invariants:
+    - Claude controls ``tool_input`` (untrusted Intent).
+    - The host application controls ``principal`` (trusted identity).
+    - DataFence issues a signed capability; it does NOT execute the query.
+    - The customer's connector receives the capability and executes it.
 
 Usage::
 
     from datafence.integrations.anthropic_tool import DataFenceAnthropicTool
+    from datafence.core.types import Actor
     import anthropic
 
-    boundary = DataFenceBoundary.create(...)
+    # boundary = DataFenceBoundary.create(policy_engine=..., registry=..., signing_key=...)
     tool = DataFenceAnthropicTool(boundary)
 
     client = anthropic.Anthropic()
-
     response = client.messages.create(
         model="claude-3-5-sonnet-20241022",
         max_tokens=1024,
         tools=[tool.anthropic_tool_spec()],
-        messages=[{"role": "user", "content": "Show me recent transactions"}],
+        messages=[{"role": "user", "content": "Show me my recent orders"}],
     )
 
-    # Handle tool use in response
+    # Handle tool_use blocks in the response
     for block in response.content:
         if block.type == "tool_use":
-            result = tool.handle_call(principal, block.input)
-            # Continue conversation with tool_result...
+            result_json = tool.handle_call(
+                principal=Actor(id="user:alice", tenant_id="acme"),
+                tool_input=block.input,
+            )
+            # Pass the capability to your connector.
+            # my_connector.execute(deserialize_capability(result_json))
 """
 
 from __future__ import annotations
@@ -47,7 +60,8 @@ import json
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, Intent, Operation
+from datafence.core.principal import Principal as Actor
+from datafence.core.types import Intent, Operation
 from datafence.errors import DataFenceError
 
 
@@ -67,16 +81,16 @@ class DataFenceAnthropicTool:
         return {
             "name": self.tool_name,
             "description": (
-                "Query data through the DataFence authorization boundary. "
+                "Request data access through the DataFence authorization boundary. "
                 "Only authorized fields and rows are returned. "
-                "Sensitive fields (card numbers, SSNs) are never accessible."
+                "Sensitive fields are never accessible."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "resource": {
                         "type": "string",
-                        "description": "Data resource to query (e.g. 'transactions').",
+                        "description": "Data resource to access (e.g. 'orders').",
                     },
                     "fields": {
                         "type": "array",
@@ -106,6 +120,9 @@ class DataFenceAnthropicTool:
         """
         Handle a tool_use block from Claude.
 
+        Calls DataFenceBoundary.authorize() and returns a JSON string
+        describing the signed capability.
+
         Args:
             principal  : Authenticated principal (application responsibility).
             tool_input : The ``input`` dict from the tool_use content block.
@@ -125,6 +142,7 @@ class DataFenceAnthropicTool:
             capability = self.boundary.authorize(principal, intent)
         except DataFenceError as exc:
             return json.dumps({"status": "denied", "reasons": [str(exc)]})
+
         return json.dumps(
             {
                 "status": "authorized",
@@ -134,5 +152,6 @@ class DataFenceAnthropicTool:
                 "fields": capability.selected_fields,
                 "predicates": capability.filter_constraints(),
                 "limit": capability.limit,
+                "audience": capability.audience,
             }
         )

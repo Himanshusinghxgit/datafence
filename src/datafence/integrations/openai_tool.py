@@ -1,9 +1,9 @@
 """
-DataFence OpenAI Function-Calling adapter (Phase 7).
+DataFence OpenAI function-calling adapter.
 
 Exposes a DataFenceBoundary as an OpenAI function/tool so that GPT-4 or
-any OpenAI-compatible model can query data through a properly authorized
-execution boundary.
+any OpenAI-compatible model can request data access through a properly
+authorized boundary.
 
 Architecture::
 
@@ -11,42 +11,44 @@ Architecture::
         │  function call: {"name": "datafence_query", "arguments": {...}}
         ▼
     DataFenceOpenAITool.handle_call(principal, arguments_json)
-        │  parses JSON → Intent
+        │  parses JSON → Intent (untrusted)
         ▼
-    DataFenceBoundary.execute(principal, intent)
-        │  policy → capability → connector → validation
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
         ▼
-    OpenAI tool result (str JSON)
+    JSON response containing the signed capability
+        │
+        ▼  (caller passes capability to their own connector)
+    Customer-owned connector → database
 
-Security invariant:
-    The model controls the arguments (untrusted Intent).
-    The host application controls the principal (trusted identity).
+Security invariants:
+    - The model controls ``arguments_json`` (untrusted Intent).
+    - The host application controls ``principal`` (trusted identity).
+    - DataFence issues a signed capability; it does NOT execute the query.
+    - The customer's connector receives the capability and executes it.
 
 Usage::
 
     from datafence.integrations.openai_tool import DataFenceOpenAITool
     from datafence.core.boundary import DataFenceBoundary
-    from datafence.core.policy import create_banking_policy
-    from datafence.connectors.sqlite_connector import create_demo_database
+    from datafence.core.types import Actor
 
-    policy_engine = create_banking_policy()
-    boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
-        connector_factory=create_demo_database,
-        registry=policy_engine.registry,
-        database_path="/data/banking.db",
-    )
+    # boundary = DataFenceBoundary.create(policy_engine=..., registry=..., signing_key=...)
     tool = DataFenceOpenAITool(boundary)
 
-    # 1. Register with the model
+    # 1. Register the tool spec with the model.
     tools = [tool.openai_tool_spec()]
 
-    # 2. In your message loop, handle tool calls:
-    result = tool.handle_call(
+    # 2. In your message loop, when the model returns a function call:
+    result_json = tool.handle_call(
         principal=Actor(id="user:alice", tenant_id="acme"),
         arguments_json=tool_call.function.arguments,
     )
-    # Return result to model as a tool message
+
+    # 3. The JSON contains the signed capability.
+    #    Pass it to your connector:
+    #    capability = deserialize_capability(result_json)
+    #    my_connector.execute(capability)
 """
 
 from __future__ import annotations
@@ -86,16 +88,16 @@ class DataFenceOpenAITool:
             "function": {
                 "name": self.tool_name,
                 "description": (
-                    "Query data through the DataFence authorization boundary. "
-                    "Returns only the fields and rows you are authorized to access. "
-                    "Never returns sensitive fields like card_number or SSN."
+                    "Request data access through the DataFence authorization boundary. "
+                    "Returns a signed authorization capability for the fields and rows "
+                    "you are permitted to access. Sensitive fields are never authorized."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "resource": {
                             "type": "string",
-                            "description": "Data resource to query (e.g. 'transactions').",
+                            "description": "Data resource to access (e.g. 'orders').",
                         },
                         "fields": {
                             "type": "array",
@@ -105,7 +107,7 @@ class DataFenceOpenAITool:
                         "filters": {
                             "type": "object",
                             "additionalProperties": {"type": "string"},
-                            "description": 'Key=value row filters (e.g. {"merchant": "Amazon"}).',
+                            "description": 'Key=value row filters (e.g. {"status": "shipped"}).',
                         },
                         "limit": {
                             "type": "integer",
@@ -126,13 +128,16 @@ class DataFenceOpenAITool:
         """
         Handle a tool call from the model.
 
+        Calls DataFenceBoundary.authorize() and returns a JSON string
+        describing the signed capability.  The caller must pass the
+        capability to their own connector for execution.
+
         Args:
             principal       : Authenticated principal from the application.
-            arguments_json  : The ``function.arguments`` string from the
-                              OpenAI tool call (or a pre-parsed dict).
+            arguments_json  : The ``function.arguments`` string or pre-parsed dict.
 
         Returns:
-            JSON string to return as the tool message content.
+            JSON string with the authorization result.
         """
         if isinstance(arguments_json, str):
             args = json.loads(arguments_json)
@@ -150,12 +155,8 @@ class DataFenceOpenAITool:
         try:
             capability = self.boundary.authorize(principal, intent)
         except DataFenceError as exc:
-            return json.dumps(
-                {
-                    "status": "denied",
-                    "reasons": [str(exc)],
-                }
-            )
+            return json.dumps({"status": "denied", "reasons": [str(exc)]})
+
         return json.dumps(
             {
                 "status": "authorized",
@@ -166,5 +167,6 @@ class DataFenceOpenAITool:
                 "predicates": capability.filter_constraints(),
                 "limit": capability.limit,
                 "expires_at": capability.expires_at.isoformat() if capability.expires_at else None,
+                "audience": capability.audience,
             }
         )

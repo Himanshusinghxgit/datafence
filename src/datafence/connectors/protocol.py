@@ -25,7 +25,9 @@ Example implementation sketch::
             self._verifier.verify(capability)   # raises on failure
             sql, params = self._compile(capability)
             rows = self._db.execute(sql, params).fetchall()
-            return ConnectorResult(rows=rows, row_count=len(rows), execution_id=capability.execution_id)
+            return ConnectorResult(
+                rows=rows, row_count=len(rows), execution_id=capability.execution_id
+            )
 """
 
 from __future__ import annotations

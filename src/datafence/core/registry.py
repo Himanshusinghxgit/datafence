@@ -155,7 +155,9 @@ class ResourceRegistry:
             fields={
                 "id":          FieldDefinition("id", "integer", DataClassification.INTERNAL),
                 "merchant":    FieldDefinition("merchant", "string", DataClassification.PUBLIC),
-                "amount":      FieldDefinition("amount", "decimal", DataClassification.CONFIDENTIAL),
+                "amount":      FieldDefinition(
+                    "amount", "decimal", DataClassification.CONFIDENTIAL
+                ),
                 "tenant_id":   FieldDefinition("tenant_id", "string",
                                                DataClassification.INTERNAL, is_tenant_key=True),
                 "card_number": FieldDefinition("card_number", "string",

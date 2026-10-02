@@ -1,5 +1,5 @@
 """
-DataFence LangChain tool adapter (Phase 7).
+DataFence LangChain tool adapter.
 
 Wraps a DataFenceBoundary as a LangChain BaseTool so it can be used inside
 LangChain agents, chains, and tool executors.
@@ -7,35 +7,42 @@ LangChain agents, chains, and tool executors.
 Architecture::
 
     LangChain Agent
-        │  tool.run("{'resource': 'transactions', 'fields': [...]}")
+        │  tool.run('{"resource": "orders", "fields": [...]}')
         ▼
     DataFenceLangChainTool._run(query_str)
-        │  parses JSON → Intent
+        │  parses JSON → Intent (untrusted)
         ▼
-    DataFenceBoundary.execute(principal, intent)
-        │  policy → capability → connector → validation
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
         ▼
-    str (JSON result or denial)
+    JSON string describing the signed capability
+        │
+        ▼  (caller passes capability to their own connector)
+    Customer-owned connector → database
 
-Security invariant:
-    The LangChain agent controls the query string (untrusted).
-    The host application provides the principal at construction time.
+Security invariants:
+    - The LangChain agent controls the query string (untrusted Intent).
+    - The host application provides the principal at construction time.
+    - DataFence issues a signed capability; it does NOT execute the query.
+    - The customer's connector receives the capability and executes it.
 
 Usage::
 
     from datafence.integrations.langchain_tool import DataFenceLangChainTool
     from datafence.core.types import Actor
 
+    # boundary = DataFenceBoundary.create(policy_engine=..., registry=..., signing_key=...)
     principal = Actor(id="user:alice", tenant_id="acme")
     tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
 
-    # Add to LangChain agent
-    agent = initialize_agent(
-        tools=[tool],
-        llm=llm,
-        agent=AgentType.OPENAI_FUNCTIONS,
-    )
-    agent.run("Show me recent transactions for my account")
+    # Use directly:
+    result_json = tool.run('{"resource": "orders", "fields": ["id", "total"], "limit": 5}')
+
+    # Or add to a LangChain agent:
+    from langchain.agents import initialize_agent, AgentType
+    agent = initialize_agent(tools=[tool.as_langchain_tool()], llm=llm,
+                             agent=AgentType.OPENAI_FUNCTIONS)
+    agent.run("Show me my recent orders")
 
 Note: LangChain is an optional dependency.
     pip install 'datafence[integrations]'
@@ -47,7 +54,8 @@ import json
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, Intent, Operation
+from datafence.core.principal import Principal as Actor
+from datafence.core.types import Intent, Operation
 from datafence.errors import DataFenceError
 
 
@@ -63,10 +71,10 @@ class DataFenceLangChainTool:
 
     name: str = "datafence_query"
     description: str = (
-        "Query data through the DataFence authorization boundary. "
+        "Request data access through the DataFence authorization boundary. "
         "Input must be a JSON string with 'resource' (required), and optionally "
         "'fields' (list), 'filters' (dict), and 'limit' (int). "
-        'Example: {"resource": "transactions", "fields": ["merchant", "amount"], "limit": 5}'
+        'Example: {"resource": "orders", "fields": ["id", "total"], "limit": 5}'
     )
 
     def __init__(
@@ -79,11 +87,9 @@ class DataFenceLangChainTool:
         self.principal = principal
         self.name = tool_name
 
-        # Try to inherit from LangChain BaseTool if available
         self._langchain_available = False
         try:
             import importlib.util
-
             self._langchain_available = importlib.util.find_spec("langchain.tools") is not None
         except (ImportError, ValueError):
             self._langchain_available = False
@@ -94,18 +100,17 @@ class DataFenceLangChainTool:
 
     def _run(self, query: str, **_: Any) -> str:
         """
-        Execute the tool.
+        Authorize a data access request and return a JSON capability.
 
         Args:
             query : JSON string with resource, fields, filters, limit.
 
         Returns:
-            JSON string with results or denial reason.
+            JSON string with the authorization result.
         """
         try:
             args = json.loads(query) if isinstance(query, str) else query
         except json.JSONDecodeError:
-            # Treat bare string as a resource name
             args = {"resource": query}
 
         intent = Intent(
@@ -120,6 +125,7 @@ class DataFenceLangChainTool:
             capability = self.boundary.authorize(self.principal, intent)
         except DataFenceError as exc:
             return json.dumps({"status": "denied", "reasons": [str(exc)]})
+
         return json.dumps(
             {
                 "status": "authorized",
