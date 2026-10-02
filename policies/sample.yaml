@@ -1,0 +1,34 @@
+# DataFence sample policy
+#
+# Schema reference:
+#   resources.<name>.actions.<operation>: allow | deny
+#   resources.<name>.fields.allow: [field, ...]
+#   resources.<name>.fields.deny:  [field, ...]
+#   resources.<name>.rows:         [{field, operator, value}, ...]
+#   resources.<name>.limits.rows:  <int>
+#
+# Actor references in row filters:
+#   :actor_tenant_id  → resolved from Principal.tenant_id
+#   :actor_id         → resolved from Principal.id
+#   :actor.<attr>     → resolved from Principal.attributes[attr]
+
+name: sample-policy
+version: "1.0"
+resources:
+  orders:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow: [id, tenant_id, customer_id, total, status, created_at]
+      deny: []
+    rows:
+      - field: tenant_id
+        operator: eq
+        value: ":actor_tenant_id"
+    limits:
+      rows: 100
+    obligations:
+      audit: true
