@@ -1,4 +1,4 @@
-# Multi-stage build for DataFence API
+# Multi-stage build for the DataFence library/runtime.
 FROM python:3.11-slim as builder
 
 # Set working directory
@@ -49,5 +49,7 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-# Default command (can be overridden)
-CMD ["python", "-m", "datafence.api", "policy.yaml", "--port", "8000"]
+# DataFence requires an application-provided boundary, registry, connector, and
+# authenticated principal resolver. It must not boot an unauthenticated or
+# fictitious API by default.
+CMD ["python", "-m", "datafence.cli", "--help"]

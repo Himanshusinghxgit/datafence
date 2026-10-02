@@ -27,6 +27,7 @@ from uuid import uuid4
 
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 from datafence.core.policy import PolicyDecision as EnginePolicyDecision
+from datafence.core.policy import PolicyEffect
 from datafence.core.registry import ResourceRegistry
 from datafence.core.resources import Filter
 from datafence.core.types import (
@@ -120,6 +121,9 @@ class ResultValidator:
     this layer ensures returned data matches the ExecutionPlan.
     """
 
+    def __init__(self, registry: ResourceRegistry | None = None) -> None:
+        self._registry = registry
+
     def validate(
         self,
         plan: ExecutionPlan,
@@ -147,6 +151,40 @@ class ResultValidator:
             if missing:
                 errors.append(f"Result is missing authorized fields: {missing}")
                 break
+
+        # Check: values match the registry's declared logical types.  This is
+        # deliberately conservative: unknown connector-native types are not
+        # rejected, while obvious mismatches are.
+        if self._registry is not None and self._registry.exists(plan.resource):
+            resource = self._registry.get(plan.resource)
+            assert resource is not None
+            for row in data:
+                for field_name in plan.selected_fields:
+                    value = row.get(field_name)
+                    definition = resource.fields[field_name]
+                    if value is None and definition.nullable:
+                        continue
+                    expected = definition.data_type.lower()
+                    valid = (
+                        expected in {"string", "text"} and isinstance(value, str)
+                    ) or (
+                        expected in {"integer", "int"}
+                        and isinstance(value, int)
+                        and not isinstance(value, bool)
+                    ) or (
+                        expected in {"decimal", "float", "number"}
+                        and isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                    ) or (expected in {"boolean", "bool"} and isinstance(value, bool))
+                    if expected not in {"string", "text", "integer", "int", "decimal", "float", "number", "boolean", "bool"}:
+                        valid = True
+                    if not valid:
+                        errors.append(
+                            f"Result field '{field_name}' has invalid type for {expected}"
+                        )
+                        break
+                if errors:
+                    break
 
         # Check: Row count within limit
         if len(data) > plan.limit:
@@ -225,7 +263,7 @@ class DataFenceBoundary:
         self._registry = registry
         self._capability_ttl_seconds = capability_ttl_seconds
         self._capability_audience = capability_audience
-        self.validator = ResultValidator()
+        self.validator = ResultValidator(registry)
 
         # Set or generate signing key
         if signing_key is not None:
@@ -312,7 +350,7 @@ class DataFenceBoundary:
         boundary._registry = registry
         boundary._capability_ttl_seconds = capability_ttl_seconds
         boundary._capability_audience = capability_audience
-        boundary.validator = ResultValidator()
+        boundary.validator = ResultValidator(registry)
 
         return boundary
 
@@ -357,6 +395,13 @@ class DataFenceBoundary:
         except Exception as exc:
             return self._denied(request, [f"Policy evaluation failed: {exc}"])
 
+        # A malformed or foreign decision is a deny, never an exception or
+        # an implicit allow.
+        if not isinstance(raw_decision, EnginePolicyDecision):
+            return self._denied(request, ["Invalid policy decision"])
+        if raw_decision.effect not in (PolicyEffect.ALLOW, PolicyEffect.DENY):
+            return self._denied(request, ["Invalid policy decision"])
+
         # Step 3: check decision
         if self._is_deny(raw_decision):
             return self._denied(request, self._reasons(raw_decision), raw_decision)
@@ -399,10 +444,8 @@ class DataFenceBoundary:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_deny(raw_decision: Any) -> bool:
+    def _is_deny(raw_decision: EnginePolicyDecision) -> bool:
         """Return True if raw_decision is a denial."""
-        from datafence.core.policy import PolicyEffect
-
         return bool(raw_decision.effect == PolicyEffect.DENY)
 
     @staticmethod

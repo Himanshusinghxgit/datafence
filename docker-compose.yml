@@ -1,4 +1,4 @@
-# Docker Compose for local development and testing
+# Docker Compose for local development only. Do not use these defaults in production.
 version: '3.8'
 
 services:
@@ -14,8 +14,7 @@ services:
       - DATAFENCE_POSTGRES_PORT=5432
       - DATAFENCE_POSTGRES_DATABASE=datafence
       - DATAFENCE_POSTGRES_USER=datafence
-      - DATAFENCE_POSTGRES_PASSWORD=datafence_password
-      - API_KEY=dev-secret-key-123
+      - DATAFENCE_POSTGRES_PASSWORD=${DATAFENCE_POSTGRES_PASSWORD:?set a local dev password}
     volumes:
       - ./policies:/app/policies:ro
       - ./logs:/app/logs
@@ -38,7 +37,7 @@ services:
     environment:
       - POSTGRES_DB=datafence
       - POSTGRES_USER=datafence
-      - POSTGRES_PASSWORD=datafence_password
+      - POSTGRES_PASSWORD=${DATAFENCE_POSTGRES_PASSWORD:?set a local dev password}
     ports:
       - "5432:5432"
     volumes:
@@ -74,7 +73,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set a local dev password}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana

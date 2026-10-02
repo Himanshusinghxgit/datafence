@@ -5,6 +5,8 @@ These are first-class types representing the security boundary.
 Not dictionaries.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -259,6 +261,42 @@ class Evidence:
 
     # For denied requests
     denial_reasons: list[str] = field(default_factory=list)
+    evidence_hash: str = ""
+
+    def __post_init__(self) -> None:
+        """Attach a deterministic tamper-evident digest to the evidence."""
+        if self.evidence_hash:
+            return
+        plan = None
+        if self.execution_plan is not None:
+            plan = {
+                "execution_id": self.execution_plan.execution_id,
+                "resource": self.execution_plan.resource,
+                "operation": self.execution_plan.operation.value,
+                "selected_fields": self.execution_plan.selected_fields,
+                "enforced_filters": self.execution_plan.enforced_filters,
+                "limit": self.execution_plan.limit,
+                "policy_version": self.execution_plan.policy_version,
+                "policy_decisions": self.execution_plan.policy_decisions,
+            }
+        payload = {
+            "execution_id": self.execution_id,
+            "request_id": self.request_id,
+            "actor_id": self.actor_id,
+            "tenant_id": self.tenant_id,
+            "resource": self.resource,
+            "operation": self.operation,
+            "policy_version": self.policy_version,
+            "decision": self.decision.value,
+            "timestamp": self.timestamp.isoformat(),
+            "execution_plan": plan,
+            "row_count": self.row_count,
+            "denial_reasons": self.denial_reasons,
+        }
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        object.__setattr__(self, "evidence_hash", digest)
 
     @staticmethod
     def create_allowed(

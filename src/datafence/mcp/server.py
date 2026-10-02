@@ -87,10 +87,9 @@ class DataFenceMCPServer:
         MCP server name advertised to clients.
     version : str
         Server version string.
-    principal_resolver : Callable | None
-        Optional callable ``(session_context: dict) -> Actor``.
-        If not provided, the server expects the principal to be passed
-        directly in the request metadata under the key ``"principal"``.
+    principal_resolver : Callable
+        Required callable ``(authenticated_context: dict) -> Actor``. The
+        agent's JSON arguments and request metadata are never a principal.
     """
 
     def __init__(
@@ -102,7 +101,10 @@ class DataFenceMCPServer:
     ) -> None:
         self.server_name = server_name
         self.version = version
-        self._principal_resolver = principal_resolver
+        # Direct callers must provide authenticated context. The legacy
+        # resolver below exists only for the pre-v1 Python API; raw MCP JSON
+        # never forwards its agent-controlled _session field.
+        self._principal_resolver = principal_resolver or self._legacy_direct_resolver
 
         self._query_tool = DataFenceQueryTool(boundary=boundary)
         self._tools: dict[str, DataFenceQueryTool] = {self._query_tool.tool_name: self._query_tool}
@@ -208,7 +210,10 @@ class DataFenceMCPServer:
             result = self.handle_call_tool(
                 tool_name=params.get("name", ""),
                 arguments=params.get("arguments", {}),
-                session_context=params.get("_session", {}),
+                # _session is agent-controlled JSON and is intentionally not
+                # trusted. Transport adapters must call handle_call_tool with
+                # an authenticated context obtained outside the MCP request.
+                session_context=None,
             )
         else:
             result = self._error_response(f"Unknown method: {method!r}")
@@ -227,24 +232,21 @@ class DataFenceMCPServer:
         """
         Resolve the authenticated principal from session context.
 
-        If a custom resolver was provided at construction, use it.
-        Otherwise, expects session_context to contain "principal" with
-        keys "id" and "tenant_id".
+        The context must be supplied by a trusted transport adapter.
         """
-        if self._principal_resolver:
-            return self._principal_resolver(session_context)
+        principal = self._principal_resolver(session_context)
+        if not isinstance(principal, Actor):
+            raise TypeError("principal_resolver must return Actor")
+        return principal
 
+    @staticmethod
+    def _legacy_direct_resolver(session_context: dict) -> Actor:
+        """Compatibility for direct Python callers; not used by raw MCP."""
         principal_data = session_context.get("principal")
         if not principal_data:
-            raise ValueError(
-                "No principal in session context. "
-                "Provide a principal_resolver or include 'principal' in session context."
-            )
-        return Actor(
-            id=principal_data["id"],
-            tenant_id=principal_data["tenant_id"],
-            metadata=principal_data.get("metadata", {}),
-        )
+            raise ValueError("authenticated principal context required")
+        return Actor(id=principal_data["id"], tenant_id=principal_data["tenant_id"],
+                     metadata=principal_data.get("metadata", {}))
 
     @staticmethod
     def _error_response(message: str) -> dict[str, Any]:

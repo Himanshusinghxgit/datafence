@@ -59,6 +59,7 @@ from datafence.core.policy import (
     ActionDecision,
     DataFencePolicy,
     DataFencePolicyEngine,
+    PolicyDecision,
     PolicyEffect,
     ResourcePolicy,
     RowRule,
@@ -104,7 +105,6 @@ from datafence.core.types import (
     ExecutionResult,
     Intent,
     Operation,
-    PolicyDecision,
     Request,
 )
 

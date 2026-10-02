@@ -1,320 +1,112 @@
-"""
-REST API wrapper for DataFence.
+"""Authenticated REST adapter for the canonical DataFence boundary."""
 
-Provides HTTP API for DataFence with authentication and rate limiting.
-"""
-
+from collections.abc import Callable
 from typing import Any
 
 try:
-    import uvicorn
     from fastapi import Depends, FastAPI, HTTPException, status
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
     from pydantic import BaseModel, Field
-except ImportError:
+except ImportError:  # pragma: no cover
     FastAPI = None
     HTTPException = None
     HTTPBearer = None
     BaseModel = object
     Field = None
 
-from datafence import DataFence
-from datafence.errors import DataFenceError
+from datafence.core.boundary import DataFenceBoundary
+from datafence.core.types import Actor, AllowedRequest, Intent, Operation
 
 
-# Request/Response models
 class ExecuteRequest(BaseModel):
-    """Request to execute a query."""
-
-    actor: dict[str, Any] = Field(..., description="Actor information")
-    operation: str = Field(..., description="Operation type (read, insert, update, delete)")
-    resource: str = Field(..., description="Resource name")
-    fields: list[str] | None = Field(None, description="Fields to retrieve")
-    filters: dict[str, Any] | None = Field(None, description="Filter conditions")
-    limit: int | None = Field(None, description="Maximum rows")
-    context: dict[str, Any] | None = Field(None, description="Additional context")
+    operation: str = Field(...)
+    resource: str = Field(...)
+    fields: list[str] | None = None
+    filters: dict[str, Any] | None = None
+    limit: int | None = None
 
 
 class ExecuteResponse(BaseModel):
-    """Response from execute."""
-
-    success: bool = Field(..., description="Whether request was successful")
-    verified: bool = Field(..., description="Whether result was verified")
-    data: list[dict[str, Any]] | None = Field(None, description="Query results")
-    row_count: int | None = Field(None, description="Number of rows returned")
-    decision: str = Field(..., description="Policy decision")
-    reasons: list[str] | None = Field(None, description="Reasons for denial")
-    evidence_hash: str | None = Field(None, description="Evidence hash")
-    timestamp: str | None = Field(None, description="Execution timestamp")
+    success: bool
+    verified: bool
+    data: list[dict[str, Any]] | None = None
+    row_count: int | None = None
+    decision: str
+    reasons: list[str] | None = None
+    evidence_hash: str | None = None
+    timestamp: str | None = None
 
 
 class DescribeRequest(BaseModel):
-    """Request to describe a resource."""
-
-    resource: str = Field(..., description="Resource name")
+    resource: str
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-
-    status: str = Field(..., description="Service status")
-    version: str = Field(..., description="DataFence version")
+    status: str
+    version: str
 
 
 def create_api(
-    fence: DataFence,
-    api_keys: set[str] | None = None,
+    boundary: DataFenceBoundary,
+    principal_resolver: Callable[[HTTPAuthorizationCredentials], Actor],
     enable_cors: bool = True,
     title: str = "DataFence API",
-    description: str = "Secure data access API with policy enforcement",
+    description: str = "Authenticated policy-enforced data access",
     version: str = "1.0.0",
 ) -> Any:
-    """
-    Create FastAPI application for DataFence.
-
-    Args:
-        fence: Configured DataFence instance
-        api_keys: Set of valid API keys (if None, no auth required)
-        enable_cors: Enable CORS middleware
-        title: API title
-        description: API description
-        version: API version
-
-    Returns:
-        FastAPI application
-
-    Example:
-        fence = DataFence.from_yaml("policy.yaml", connector)
-        app = create_api(fence, api_keys={"secret-key-1", "secret-key-2"})
-        uvicorn.run(app, host="0.0.0.0", port=8000)
-    """
+    """Create an API; identity is resolved from bearer credentials only."""
     if FastAPI is None:
         raise ImportError("fastapi required. Install with: pip install 'datafence[api]'")
-
     app = FastAPI(title=title, description=description, version=version)
-
-    # CORS
     if enable_cors:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+        app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=False,
+                           allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+    bearer = HTTPBearer(auto_error=True)
 
-    # Authentication
-    security = HTTPBearer(auto_error=False) if api_keys else None
+    def principal(credentials: HTTPAuthorizationCredentials = Depends(bearer)) -> Actor:  # noqa: B008
+        try:
+            actor = principal_resolver(credentials)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed") from exc
+        if not isinstance(actor, Actor):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed")
+        return actor
 
-    def verify_api_key(
-        credentials: HTTPAuthorizationCredentials | None = Depends(security),  # noqa: B008
-    ) -> None:
-        """Verify API key."""
-        if api_keys:
-            if not credentials or credentials.credentials not in api_keys:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid or missing API key",
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-
-    @app.get("/health", response_model=HealthResponse, tags=["Health"])
-    async def health():
-        """Health check endpoint."""
+    @app.get("/health", response_model=HealthResponse)
+    async def health() -> HealthResponse:
         return HealthResponse(status="healthy", version=version)
 
-    @app.post(
-        "/execute",
-        response_model=ExecuteResponse,
-        tags=["Data"],
-        dependencies=[Depends(verify_api_key)] if api_keys else [],
-    )
-    async def execute(request: ExecuteRequest):
-        """
-        Execute a data request with policy enforcement.
-
-        Validates the request against policies, executes the query,
-        and returns results with evidence.
-        """
+    @app.post("/execute", response_model=ExecuteResponse)
+    async def execute(request: ExecuteRequest, actor: Actor = Depends(principal)) -> ExecuteResponse:  # noqa: B008
         try:
-            # Convert to dict for DataFence
-            request_dict = {
-                "actor": request.actor,
-                "operation": request.operation,
-                "resource": request.resource,
-            }
+            result = boundary.execute(actor, Intent(
+                resource=request.resource, operation=Operation(request.operation.lower()),
+                fields=request.fields, filters=request.filters or {}, limit=request.limit,
+            ))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request") from exc
+        if isinstance(result, AllowedRequest):
+            return ExecuteResponse(success=True, verified=True, data=result.execution_result.data,
+                row_count=result.execution_result.row_count, decision="allow",
+                evidence_hash=result.evidence.evidence_hash, timestamp=result.evidence.timestamp.isoformat())
+        return ExecuteResponse(success=False, verified=False, decision="deny", reasons=result.decision.reasons,
+            evidence_hash=result.evidence.evidence_hash, timestamp=result.evidence.timestamp.isoformat())
 
-            if request.fields:
-                request_dict["fields"] = request.fields
-            if request.filters:
-                request_dict["filters"] = request.filters
-            if request.limit:
-                request_dict["limit"] = request.limit
-            if request.context:
-                request_dict["context"] = request.context
+    @app.post("/describe")
+    async def describe(request: DescribeRequest, _: Actor = Depends(principal)) -> dict[str, Any]:  # noqa: B008
+        resource = boundary._registry.get(request.resource)
+        if resource is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
+        return {"success": True, "metadata": {"name": resource.name, "fields": resource.field_names(), "description": resource.description}}
 
-            # Execute through DataFence
-            result = fence.execute(request_dict)
-
-            # Format response
-            return ExecuteResponse(
-                success=result.verified,
-                verified=result.verified,
-                data=result.data if result.verified else None,
-                row_count=len(result.data) if result.verified else None,
-                decision=result.decision.decision.value,
-                reasons=result.decision.reasons if not result.verified else None,
-                evidence_hash=result.evidence.evidence_hash if result.verified else None,
-                timestamp=result.evidence.timestamp if result.verified else None,
-            )
-
-        except DataFenceError as e:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-            ) from e
-
-    @app.post(
-        "/describe",
-        tags=["Metadata"],
-        dependencies=[Depends(verify_api_key)] if api_keys else [],
-    )
-    async def describe(request: DescribeRequest):
-        """
-        Describe a resource (table metadata).
-
-        Returns column information and metadata.
-        """
-        try:
-            metadata = fence.connector.describe(request.resource)
-            return {"success": True, "metadata": metadata}
-
-        except DataFenceError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-            ) from e
-
-    @app.get(
-        "/policy",
-        tags=["Policy"],
-        dependencies=[Depends(verify_api_key)] if api_keys else [],
-    )
-    async def get_policy():
-        """
-        Get current policy information.
-
-        Returns policy name, version, and resource list.
-        """
-        if not fence.policy:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No policy loaded")
-
-        return {
-            "name": fence.policy.name,
-            "description": getattr(fence.policy, "description", None),
-            "resources": list(fence.policy.resources.keys()),
-        }
-
-    @app.get(
-        "/policy/resources/{resource_name}",
-        tags=["Policy"],
-        dependencies=[Depends(verify_api_key)] if api_keys else [],
-    )
-    async def get_resource_policy(resource_name: str):
-        """
-        Get policy for a specific resource.
-
-        Returns allowed operations, fields, and limits.
-        """
-        if not fence.policy or resource_name not in fence.policy.resources:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Resource '{resource_name}' not found in policy",
-            )
-
-        resource_config = fence.policy.resources[resource_name]
-
-        return {
-            "resource": resource_name,
-            "operations": resource_config.operations,
-            "fields": resource_config.fields,
-            "limits": getattr(resource_config, "limits", None),
-        }
+    @app.get("/policy")
+    async def policy(_: Actor = Depends(principal)) -> dict[str, Any]:  # noqa: B008
+        engine = boundary.policy_engine
+        return {"name": engine.policy_name, "version": engine.policy_version, "resources": boundary._registry.all_resources()}
 
     return app
 
 
-def run_api(
-    fence: DataFence,
-    host: str = "0.0.0.0",
-    port: int = 8000,
-    api_keys: set[str] | None = None,
-    **kwargs,
-):
-    """
-    Run DataFence API server.
-
-    Args:
-        fence: Configured DataFence instance
-        host: Host to bind to
-        port: Port to bind to
-        api_keys: Set of valid API keys
-        **kwargs: Additional arguments for uvicorn.run
-
-    Example:
-        fence = DataFence.from_yaml("policy.yaml", connector)
-        run_api(fence, port=8000, api_keys={"my-secret-key"})
-    """
-    if uvicorn is None:
-        raise ImportError("uvicorn required. Install with: pip install 'datafence[api]'")
-
-    app = create_api(fence, api_keys=api_keys)
-    uvicorn.run(app, host=host, port=port, **kwargs)
-
-
-# CLI integration
-def main():
-    """CLI entry point for running API server."""
-    import sys
-
-    if len(sys.argv) < 2:
-        print("Usage: python -m datafence.api <policy_file> [--port PORT] [--api-key KEY]")
-        sys.exit(1)
-
-    policy_file = sys.argv[1]
-
-    # Parse options
-    port = 8000
-    api_keys = set()
-
-    i = 2
-    while i < len(sys.argv):
-        if sys.argv[i] == "--port" and i + 1 < len(sys.argv):
-            port = int(sys.argv[i + 1])
-            i += 2
-        elif sys.argv[i] == "--api-key" and i + 1 < len(sys.argv):
-            api_keys.add(sys.argv[i + 1])
-            i += 2
-        else:
-            i += 1
-
-    # Create connector (simple memory for demo)
-    from datafence.connectors import MemoryConnector
-
-    connector = MemoryConnector(data={})
-
-    # Load DataFence
-    fence = DataFence.from_yaml(policy_file, connector)
-
-    print(f"Starting DataFence API server on port {port}")
-    print(f"Policy: {policy_file}")
-    print(f"Authentication: {'Enabled' if api_keys else 'Disabled'}")
-
-    run_api(fence, port=port, api_keys=api_keys if api_keys else None)
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit("Configure a boundary and call create_api() from an application entrypoint")

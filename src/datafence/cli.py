@@ -99,9 +99,7 @@ def describe(policy_file: str, resource: str, format: str):
         with open(policy_file) as f:
             policy_dict = yaml.safe_load(f)
 
-        from datafence.policy.models import Policy
-
-        policy = Policy.model_validate(policy_dict["policy"])
+        policy = YAMLPolicyLoader.from_dict(policy_dict)
 
         if resource not in policy.resources:
             click.secho(f"✗ Resource '{resource}' not found in policy", fg="red")
@@ -113,8 +111,8 @@ def describe(policy_file: str, resource: str, format: str):
             # JSON output
             output = {
                 "resource": resource,
-                "operations": resource_config.operations,
-                "fields": resource_config.fields,
+                "operations": {k: v.value for k, v in resource_config.actions.items()},
+                "fields": {"allow": resource_config.allowed_fields, "deny": resource_config.denied_fields},
             }
 
             if hasattr(resource_config, "limits") and resource_config.limits:
@@ -131,27 +129,27 @@ def describe(policy_file: str, resource: str, format: str):
             click.echo("=" * 50)
 
             click.echo("\nOperations:")
-            click.echo(f"  Allowed: {', '.join(resource_config.operations.get('allow', []))}")
-            if resource_config.operations.get("deny"):
-                click.echo(f"  Denied: {', '.join(resource_config.operations['deny'])}")
+            click.echo("  Allowed: " + ", ".join(k for k, v in resource_config.actions.items() if v.value == "allow"))
+            denied = [k for k, v in resource_config.actions.items() if v.value == "deny"]
+            if denied:
+                click.echo(f"  Denied: {', '.join(denied)}")
 
             click.echo("\nFields:")
-            allowed_fields = resource_config.fields.get("allow", [])
+            allowed_fields = resource_config.allowed_fields
             click.echo(f"  Allowed ({len(allowed_fields)}): {', '.join(allowed_fields)}")
 
-            denied_fields = resource_config.fields.get("deny", [])
+            denied_fields = resource_config.denied_fields
             if denied_fields:
                 click.echo(f"  Denied ({len(denied_fields)}): {', '.join(denied_fields)}")
 
-            if hasattr(resource_config, "limits") and resource_config.limits:
+            if resource_config.max_rows:
                 click.echo("\nLimits:")
-                for key, value in resource_config.limits.items():
-                    click.echo(f"  {key}: {value}")
+                click.echo(f"  max_rows: {resource_config.max_rows}")
 
-            if hasattr(resource_config, "row_filters") and resource_config.row_filters:
+            if resource_config.row_rules:
                 click.echo("\nRow Filters:")
-                for key, value in resource_config.row_filters.items():
-                    click.echo(f"  {key}: {value}")
+                for rule in resource_config.row_rules:
+                    click.echo(f"  {rule.field} {rule.operator.value} {rule.value!r}")
 
     except Exception as e:
         click.secho(f"✗ Error: {e}", fg="red")
@@ -200,39 +198,24 @@ def init(output: str):
         datafence init
         datafence init --output my-policy.yaml
     """
-    sample_policy = """version: "1"
-
-policy:
-  name: sample-policy
-  description: Sample DataFence policy
-
-  resources:
-    users:
-      operations:
-        allow: [read]
-        deny: [insert, update, delete]
-
-      fields:
-        allow:
-          - id
-          - email
-          - name
-          - created_at
-        deny:
-          - password_hash
-          - ssn
-
-      row_filters:
-        tenant_id: "{{ actor.tenant_id }}"
-
-      limits:
-        max_rows: 100
-        max_date_range_days: 30
-
-  actors:
-    agent:
-      type: agent
-      description: AI agent with read-only access
+    sample_policy = """name: sample-policy
+version: "1.0"
+resources:
+  users:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow: [id, email, name, created_at]
+      deny: [password_hash, ssn]
+    rows:
+      - field: tenant_id
+        operator: eq
+        value: ":actor_tenant_id"
+    limits:
+      rows: 100
 """
 
     try:
@@ -248,7 +231,7 @@ policy:
         click.echo("\nNext steps:")
         click.echo(f"  1. Edit {output} to match your needs")
         click.echo(f"  2. Validate: datafence validate {output}")
-        click.echo(f"  3. Test: datafence test {output} request.json")
+        click.echo("  3. Construct a ResourceRegistry and DataFenceBoundary in your service")
 
     except Exception as e:
         click.secho(f"✗ Error: {e}", fg="red")
