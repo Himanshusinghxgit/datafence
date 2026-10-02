@@ -238,8 +238,8 @@ class APIKeyDetector(PIIDetector):
     """API key and secret detector."""
 
     PATTERNS = [
-        re.compile(r"sk_live_[A-Za-z0-9]{24,}"),  # Stripe live
-        re.compile(r"sk_test_[A-Za-z0-9]{20,}"),  # Stripe test (reduced from 24)
+        re.compile(r"sk_live_[A-Za-z0-9_]{24,}"),  # Stripe live
+        re.compile(r"sk_test_[A-Za-z0-9_]{20,}"),  # Stripe test (reduced from 24)
         re.compile(r"AIza[A-Za-z0-9_-]{35}"),  # Google
     ]
 

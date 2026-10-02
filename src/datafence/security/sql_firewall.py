@@ -9,7 +9,7 @@ from enum import Enum
 
 import sqlparse
 from sqlparse import sql
-from sqlparse.tokens import DDL, DML, Keyword
+from sqlparse.tokens import DDL, DML, Keyword, Name
 
 from datafence.errors import ValidationError
 
@@ -279,7 +279,7 @@ def _extract_tables_from_statement(statement: sql.Statement) -> list[str]:
             # Next non-whitespace token should be table name
             for j in range(i + 1, len(tokens)):
                 next_token = tokens[j]
-                if next_token.ttype is None and str(next_token).strip():
+                if next_token.ttype in Name and str(next_token).strip():
                     # This might be a table name
                     name = str(next_token).strip()
                     # Remove alias if present
