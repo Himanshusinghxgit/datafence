@@ -3,8 +3,6 @@ Integration tests for PII detection in DataFence engine.
 """
 
 import pytest
-
-from datafence import DataFence
 from datafence.connectors.memory import MemoryConnector
 from datafence.policy.models import (
     FieldPolicy,
@@ -12,6 +10,8 @@ from datafence.policy.models import (
     Policy,
     ResourcePolicy,
 )
+
+from datafence import DataFence
 from datafence.security.pii import RedactionStrategy
 
 

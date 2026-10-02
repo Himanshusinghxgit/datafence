@@ -60,7 +60,7 @@ class SQLiteConnector:
             signing_key   : 32-byte HMAC key shared with DataFenceBoundary.
         """
         self.database_path = database_path
-        self._signing_key = signing_key          # PRIVATE — never expose
+        self._signing_key = signing_key  # PRIVATE — never expose
         self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = sqlite3.Row
 
@@ -98,7 +98,6 @@ class SQLiteConnector:
         rows = cursor.fetchall()
 
         # 4. Return only authorised fields (defence-in-depth)
-        authorised = set(capability.selected_fields)
         return [
             {col: row[col] for col in capability.selected_fields if col in row.keys()}
             for row in rows
@@ -108,18 +107,14 @@ class SQLiteConnector:
     # SQL compiler
     # ------------------------------------------------------------------
 
-    def _compile(
-        self, capability: AuthorizedExecution
-    ) -> tuple[str, dict[str, Any]]:
+    def _compile(self, capability: AuthorizedExecution) -> tuple[str, dict[str, Any]]:
         if capability.operation == Operation.READ:
             return self._compile_select(capability)
         raise NotImplementedError(
             f"Operation {capability.operation!r} not implemented in SQLiteConnector"
         )
 
-    def _compile_select(
-        self, capability: AuthorizedExecution
-    ) -> tuple[str, dict[str, Any]]:
+    def _compile_select(self, capability: AuthorizedExecution) -> tuple[str, dict[str, Any]]:
         """
         Compile a SELECT statement from a verified AuthorizedExecution.
 
@@ -134,14 +129,11 @@ class SQLiteConnector:
             LIMIT 100
         """
         # Validate resource name
-        resource = validate_identifier(
-            capability.resource, context="resource name"
-        )
+        resource = validate_identifier(capability.resource, context="resource name")
 
         # Validate and quote field names
         fields_sql = ", ".join(
-            validate_identifier(f, context="field name")
-            for f in capability.selected_fields
+            validate_identifier(f, context="field name") for f in capability.selected_fields
         )
 
         sql = f"SELECT {fields_sql} FROM {resource}"
@@ -170,7 +162,7 @@ class SQLiteConnector:
         if self.connection:
             self.connection.close()
 
-    def __enter__(self) -> "SQLiteConnector":
+    def __enter__(self) -> SQLiteConnector:
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -180,6 +172,7 @@ class SQLiteConnector:
 # ---------------------------------------------------------------------------
 # Malicious connector — TESTING ONLY
 # ---------------------------------------------------------------------------
+
 
 class MaliciousConnector(SQLiteConnector):
     """
@@ -207,6 +200,7 @@ class MaliciousConnector(SQLiteConnector):
 # Demo database factory
 # ---------------------------------------------------------------------------
 
+
 def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnector:
     """
     Create (or re-create) the demo database and return a connector.
@@ -233,7 +227,8 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
     cur.execute("DROP TABLE IF EXISTS transactions")
     cur.execute("DROP TABLE IF EXISTS accounts")
 
-    cur.execute("""
+    cur.execute(
+        """
         CREATE TABLE customers (
             id             INTEGER PRIMARY KEY,
             tenant_id      TEXT NOT NULL,
@@ -242,8 +237,10 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
             ssn            TEXT NOT NULL,
             account_number TEXT NOT NULL
         )
-    """)
-    cur.execute("""
+    """
+    )
+    cur.execute(
+        """
         CREATE TABLE transactions (
             id          INTEGER PRIMARY KEY,
             tenant_id   TEXT NOT NULL,
@@ -253,8 +250,10 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
             timestamp   TEXT NOT NULL,
             card_number TEXT NOT NULL
         )
-    """)
-    cur.execute("""
+    """
+    )
+    cur.execute(
+        """
         CREATE TABLE accounts (
             id             INTEGER PRIMARY KEY,
             tenant_id      TEXT NOT NULL,
@@ -262,28 +261,29 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
             account_number TEXT NOT NULL,
             balance        REAL NOT NULL
         )
-    """)
+    """
+    )
 
     # Tenant A
     cur.executemany(
         "INSERT INTO customers VALUES (?,?,?,?,?,?)",
         [
             (1, "tenant_a", "Alice Johnson", "alice@tenant-a.com", "123-45-6789", "ACC-A-001"),
-            (2, "tenant_a", "Bob Smith",     "bob@tenant-a.com",   "234-56-7890", "ACC-A-002"),
+            (2, "tenant_a", "Bob Smith", "bob@tenant-a.com", "234-56-7890", "ACC-A-002"),
         ],
     )
     cur.executemany(
         "INSERT INTO transactions VALUES (?,?,?,?,?,?,?)",
         [
-            (1, "tenant_a", 1, "Amazon",    49.99, "2024-01-15 10:30:00", "4532-1111-2222-3333"),
-            (2, "tenant_a", 1, "Starbucks",  5.50, "2024-01-15 14:20:00", "4532-1111-2222-3333"),
-            (3, "tenant_a", 2, "Target",   125.00, "2024-01-16 09:15:00", "4532-4444-5555-6666"),
+            (1, "tenant_a", 1, "Amazon", 49.99, "2024-01-15 10:30:00", "4532-1111-2222-3333"),
+            (2, "tenant_a", 1, "Starbucks", 5.50, "2024-01-15 14:20:00", "4532-1111-2222-3333"),
+            (3, "tenant_a", 2, "Target", 125.00, "2024-01-16 09:15:00", "4532-4444-5555-6666"),
         ],
     )
     cur.executemany(
         "INSERT INTO accounts VALUES (?,?,?,?,?)",
         [
-            (1, "tenant_a", 1, "ACC-A-001",  5000.00),
+            (1, "tenant_a", 1, "ACC-A-001", 5000.00),
             (2, "tenant_a", 2, "ACC-A-002", 12000.00),
         ],
     )
@@ -293,21 +293,21 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
         "INSERT INTO customers VALUES (?,?,?,?,?,?)",
         [
             (3, "tenant_b", "Charlie Brown", "charlie@tenant-b.com", "345-67-8901", "ACC-B-001"),
-            (4, "tenant_b", "Diana Prince",  "diana@tenant-b.com",   "456-78-9012", "ACC-B-002"),
+            (4, "tenant_b", "Diana Prince", "diana@tenant-b.com", "456-78-9012", "ACC-B-002"),
         ],
     )
     cur.executemany(
         "INSERT INTO transactions VALUES (?,?,?,?,?,?,?)",
         [
-            (4, "tenant_b", 3, "Walmart",     75.25, "2024-01-15 11:00:00", "5555-7777-8888-9999"),
-            (5, "tenant_b", 3, "Shell Gas",   45.00, "2024-01-16 08:30:00", "5555-7777-8888-9999"),
+            (4, "tenant_b", 3, "Walmart", 75.25, "2024-01-15 11:00:00", "5555-7777-8888-9999"),
+            (5, "tenant_b", 3, "Shell Gas", 45.00, "2024-01-16 08:30:00", "5555-7777-8888-9999"),
             (6, "tenant_b", 4, "Apple Store", 999.00, "2024-01-16 15:45:00", "5555-1111-2222-3333"),
         ],
     )
     cur.executemany(
         "INSERT INTO accounts VALUES (?,?,?,?,?)",
         [
-            (3, "tenant_b", 3, "ACC-B-001",  8000.00),
+            (3, "tenant_b", 3, "ACC-B-001", 8000.00),
             (4, "tenant_b", 4, "ACC-B-002", 25000.00),
         ],
     )

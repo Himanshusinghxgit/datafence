@@ -5,7 +5,6 @@ Tests both allowed and denied scenarios.
 """
 
 import pytest
-
 from datafence.core.context import Actor, ActorType, RequestContext
 from datafence.core.decision import DecisionStatus
 from datafence.core.request import ExecutionRequest, Operation

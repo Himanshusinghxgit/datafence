@@ -7,11 +7,11 @@ Provides HTTP API for DataFence with authentication and rate limiting.
 from typing import Any
 
 try:
-    from fastapi import FastAPI, HTTPException, Depends, status, Request
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-    from fastapi.middleware.cors import CORSMiddleware
-    from pydantic import BaseModel, Field
     import uvicorn
+    from fastapi import Depends, FastAPI, HTTPException, status
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+    from pydantic import BaseModel, Field
 except ImportError:
     FastAPI = None
     HTTPException = None
@@ -90,9 +90,7 @@ def create_api(
         uvicorn.run(app, host="0.0.0.0", port=8000)
     """
     if FastAPI is None:
-        raise ImportError(
-            "fastapi required. Install with: pip install 'datafence[api]'"
-        )
+        raise ImportError("fastapi required. Install with: pip install 'datafence[api]'")
 
     app = FastAPI(title=title, description=description, version=version)
 
@@ -110,7 +108,7 @@ def create_api(
     security = HTTPBearer(auto_error=False) if api_keys else None
 
     def verify_api_key(
-        credentials: HTTPAuthorizationCredentials | None = Depends(security),
+        credentials: HTTPAuthorizationCredentials | None = Depends(security),  # noqa: B008
     ) -> None:
         """Verify API key."""
         if api_keys:
@@ -172,11 +170,11 @@ def create_api(
             )
 
         except DataFenceError as e:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-            )
+            ) from e
 
     @app.post(
         "/describe",
@@ -194,11 +192,11 @@ def create_api(
             return {"success": True, "metadata": metadata}
 
         except DataFenceError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e)) from e
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-            )
+            ) from e
 
     @app.get(
         "/policy",
@@ -212,9 +210,7 @@ def create_api(
         Returns policy name, version, and resource list.
         """
         if not fence.policy:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="No policy loaded"
-            )
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No policy loaded")
 
         return {
             "name": fence.policy.name,
@@ -283,7 +279,6 @@ def run_api(
 def main():
     """CLI entry point for running API server."""
     import sys
-    import os
 
     if len(sys.argv) < 2:
         print("Usage: python -m datafence.api <policy_file> [--port PORT] [--api-key KEY]")

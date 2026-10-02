@@ -8,7 +8,7 @@ Not dictionaries.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 from uuid import uuid4
 
 
@@ -32,7 +32,7 @@ class Decision(Enum):
 class Actor:
     """
     Actor making the request.
-    
+
     This represents WHO is making the request.
     The actor identity CANNOT be changed by the LLM.
     """
@@ -41,7 +41,7 @@ class Actor:
     tenant_id: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("Actor ID cannot be empty")
         if not self.tenant_id:
@@ -52,24 +52,24 @@ class Actor:
 class Intent:
     """
     Untrusted request from AI agent.
-    
+
     This is what the LLM PROPOSES.
     It is UNTRUSTED input.
     """
 
     resource: str
     operation: Operation
-    fields: Optional[list[str]] = None
+    fields: list[str] | None = None
     filters: dict[str, Any] = field(default_factory=dict)
-    limit: Optional[int] = None
-    raw_sql: Optional[str] = None  # If LLM generated SQL, store but DON'T execute
+    limit: int | None = None
+    raw_sql: str | None = None  # If LLM generated SQL, store but DON'T execute
 
 
 @dataclass(frozen=True)
 class Request:
     """
     Normalized request for policy evaluation.
-    
+
     This combines the untrusted Intent with the trusted Actor.
     """
 
@@ -93,7 +93,7 @@ class Request:
 class PolicyDecision:
     """
     Policy evaluation result.
-    
+
     This represents WHAT the policy says about the request.
     """
 
@@ -109,7 +109,7 @@ class ExecutionPlan:
     Authorized execution plan — DESCRIPTIVE / AUDIT OBJECT ONLY.
 
     THIS IS NOT THE EXECUTION CAPABILITY.
-    
+
     ExecutionPlan documents WHAT DataFence decided (for audit / evidence trails).
     The EXECUTABLE artifact is AuthorizedExecution (see capability.py).
 
@@ -134,20 +134,20 @@ class ExecutionPlan:
     actor: Actor
     resource: str
     operation: Operation
-    
+
     # What fields are authorized
     selected_fields: list[str]
-    
+
     # What filters are enforced by policy
     enforced_filters: dict[str, Any]
-    
+
     # Limits
     limit: int
-    
+
     # Policy provenance
     policy_version: str
     policy_decisions: list[str] = field(default_factory=list)
-    
+
     # Timestamp
     created_at: datetime = field(default_factory=datetime.utcnow)
 
@@ -175,7 +175,7 @@ class ExecutionPlan:
             policy_decisions=policy_decisions,
         )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         """Validate execution plan."""
         if not self.resource:
             raise ValueError("ExecutionPlan must have a resource")
@@ -189,7 +189,7 @@ class ExecutionPlan:
 class ExecutionResult:
     """
     Result of executing an ExecutionPlan.
-    
+
     This includes:
     - The data returned
     - Verification that it matches the plan
@@ -239,7 +239,7 @@ class ExecutionResult:
 class Evidence:
     """
     Evidence of policy compliance.
-    
+
     This proves that the request was authorized and executed correctly.
     """
 
@@ -252,11 +252,11 @@ class Evidence:
     policy_version: str
     decision: Decision
     timestamp: datetime
-    
+
     # For allowed requests
-    execution_plan: Optional[ExecutionPlan] = None
-    row_count: Optional[int] = None
-    
+    execution_plan: ExecutionPlan | None = None
+    row_count: int | None = None
+
     # For denied requests
     denial_reasons: list[str] = field(default_factory=list)
 
@@ -305,7 +305,7 @@ class Evidence:
 class AuditEvent:
     """
     Auditable event.
-    
+
     Every request (allowed or denied) produces an audit event.
     """
 
@@ -316,14 +316,14 @@ class AuditEvent:
     resource: str
     operation: str
     decision: Decision
-    
+
     # For allowed requests
-    execution_id: Optional[str] = None
-    row_count: Optional[int] = None
-    
+    execution_id: str | None = None
+    row_count: int | None = None
+
     # For denied requests
     denial_reasons: list[str] = field(default_factory=list)
-    
+
     # Policy information
     policy_version: str = "default"
 
@@ -349,7 +349,7 @@ class AuditEvent:
 class DeniedRequest:
     """
     A denied request.
-    
+
     This is returned when policy denies the request.
     The connector NEVER receives the request.
     """
@@ -367,7 +367,7 @@ class DeniedRequest:
 class AllowedRequest:
     """
     An allowed request.
-    
+
     This contains the ExecutionPlan and the result after execution.
     """
 

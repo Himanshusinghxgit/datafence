@@ -5,8 +5,6 @@ Verifies that sensitive fields cannot be accessed.
 """
 
 import pytest
-
-from datafence import DataFence
 from datafence.connectors.memory import MemoryConnector
 from datafence.core.decision import DecisionStatus
 from datafence.policy.models import (
@@ -15,6 +13,8 @@ from datafence.policy.models import (
     Policy,
     ResourcePolicy,
 )
+
+from datafence import DataFence
 
 
 @pytest.fixture

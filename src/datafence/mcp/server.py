@@ -61,7 +61,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
 from datafence.core.types import Actor
@@ -104,9 +105,7 @@ class DataFenceMCPServer:
         self._principal_resolver = principal_resolver
 
         self._query_tool = DataFenceQueryTool(boundary=boundary)
-        self._tools: dict[str, DataFenceQueryTool] = {
-            self._query_tool.tool_name: self._query_tool
-        }
+        self._tools: dict[str, DataFenceQueryTool] = {self._query_tool.tool_name: self._query_tool}
 
     def register_tool(self, tool: DataFenceQueryTool) -> None:
         """Register an additional DataFenceQueryTool under its tool_name."""
@@ -126,9 +125,7 @@ class DataFenceMCPServer:
 
     def handle_list_tools(self) -> dict[str, Any]:
         """Handle MCP tools/list request."""
-        return {
-            "tools": [tool.schema() for tool in self._tools.values()]
-        }
+        return {"tools": [tool.schema() for tool in self._tools.values()]}
 
     def handle_call_tool(
         self,
@@ -165,13 +162,15 @@ class DataFenceMCPServer:
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps({
-                            "status": "allowed",
-                            "row_count": result.row_count,
-                            "data": result.data,
-                            "request_id": result.request_id,
-                            "evidence_id": result.evidence_id,
-                        }),
+                        "text": json.dumps(
+                            {
+                                "status": "allowed",
+                                "row_count": result.row_count,
+                                "data": result.data,
+                                "request_id": result.request_id,
+                                "evidence_id": result.evidence_id,
+                            }
+                        ),
                     }
                 ]
             }
@@ -180,11 +179,13 @@ class DataFenceMCPServer:
                 "content": [
                     {
                         "type": "text",
-                        "text": json.dumps({
-                            "status": "denied",
-                            "reasons": result.denial_reasons,
-                            "request_id": result.request_id,
-                        }),
+                        "text": json.dumps(
+                            {
+                                "status": "denied",
+                                "reasons": result.denial_reasons,
+                                "request_id": result.request_id,
+                            }
+                        ),
                     }
                 ],
                 "isError": True,

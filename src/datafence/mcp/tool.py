@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, AllowedRequest, DeniedRequest, Intent, Operation
+from datafence.core.types import Actor, AllowedRequest, Intent, Operation
 
 
 @dataclass
@@ -114,7 +114,7 @@ class DataFenceQueryTool:
                     "filters": {
                         "type": "object",
                         "additionalProperties": {"type": "string"},
-                        "description": "Optional key=value filters (e.g. {\"merchant\": \"Amazon\"}).",
+                        "description": 'Optional key=value filters (e.g. {"merchant": "Amazon"}).',
                     },
                     "limit": {
                         "type": "integer",
@@ -156,7 +156,7 @@ class DataFenceQueryTool:
         # Parse operation
         op_str = params.get("operation", "read").lower()
         op_map = {
-            "read":   Operation.READ,
+            "read": Operation.READ,
             "insert": Operation.INSERT,
             "update": Operation.UPDATE,
             "delete": Operation.DELETE,

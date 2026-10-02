@@ -5,9 +5,9 @@ Comprehensive health checks for monitoring system health.
 """
 
 import time
-from typing import Any
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any
 
 
 class HealthStatus(Enum):

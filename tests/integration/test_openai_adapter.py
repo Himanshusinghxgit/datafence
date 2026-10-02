@@ -3,16 +3,17 @@ Tests for OpenAI adapter.
 """
 
 import json
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
+import pytest
 from datafence.integrations.openai_adapter import (
     OpenAIAdapter,
     OpenAIStreamingAdapter,
     create_openai_agent,
 )
+
+from datafence import DataFence
+from datafence.connectors import MemoryConnector
 
 
 @pytest.fixture
@@ -141,7 +142,7 @@ def test_execute_function_call_invalid_json(fence):
 
     actor = {"id": "test", "tenant_id": "acme"}
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         adapter.execute_function_call(function_call, actor)
 
 
@@ -156,7 +157,7 @@ def test_execute_function_call_unsupported_function(fence):
 
     actor = {"id": "test", "tenant_id": "acme"}
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         adapter.execute_function_call(function_call, actor)
 
 
@@ -242,7 +243,6 @@ def test_streaming_adapter_function_chunk(fence):
 @patch("datafence.integrations.openai_adapter.openai")
 def test_create_openai_agent_missing_openai(mock_openai, fence):
     """Test creating agent when openai package not installed."""
-    mock_openai = None
 
     with patch("datafence.integrations.openai_adapter.openai", None):
         with pytest.raises(ImportError):

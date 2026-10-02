@@ -46,35 +46,11 @@ Quick start::
 from datafence.core.boundary import DataFenceBoundary
 
 # ---------------------------------------------------------------------------
-# Types
+# Capability error (for exception handling)
+# Note: AuthorizedExecution itself is NOT exported — it is internal to
+# DataFenceBoundary. Application code should never construct capabilities.
 # ---------------------------------------------------------------------------
-from datafence.core.types import (
-    Actor,
-    AllowedRequest,
-    AuditEvent,
-    Decision,
-    DeniedRequest,
-    Evidence,
-    ExecutionPlan,
-    ExecutionResult,
-    Intent,
-    Operation,
-    PolicyDecision,
-    Request,
-)
-
-# ---------------------------------------------------------------------------
-# Typed execution IR
-# ---------------------------------------------------------------------------
-from datafence.core.resources import (
-    FieldRef,
-    Filter,
-    Predicate,
-    PredicateOperator,
-    Projection,
-    ResourceRef,
-    RowLimit,
-)
+from datafence.core.capability import CapabilityVerificationError
 
 # ---------------------------------------------------------------------------
 # Policy engine (v1.0)
@@ -102,11 +78,35 @@ from datafence.core.registry import (
 )
 
 # ---------------------------------------------------------------------------
-# Capability error (for exception handling)
-# Note: AuthorizedExecution itself is NOT exported — it is internal to
-# DataFenceBoundary. Application code should never construct capabilities.
+# Typed execution IR
 # ---------------------------------------------------------------------------
-from datafence.core.capability import CapabilityVerificationError
+from datafence.core.resources import (
+    FieldRef,
+    Filter,
+    Predicate,
+    PredicateOperator,
+    Projection,
+    ResourceRef,
+    RowLimit,
+)
+
+# ---------------------------------------------------------------------------
+# Types
+# ---------------------------------------------------------------------------
+from datafence.core.types import (
+    Actor,
+    AllowedRequest,
+    AuditEvent,
+    Decision,
+    DeniedRequest,
+    Evidence,
+    ExecutionPlan,
+    ExecutionResult,
+    Intent,
+    Operation,
+    PolicyDecision,
+    Request,
+)
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -126,7 +126,6 @@ __version__ = "1.0.0"
 __all__ = [
     # ── Core ─────────────────────────────────────────────────────────────
     "DataFenceBoundary",
-
     # ── Types ─────────────────────────────────────────────────────────────
     "Actor",
     "Intent",
@@ -134,13 +133,12 @@ __all__ = [
     "Operation",
     "Decision",
     "PolicyDecision",
-    "ExecutionPlan",       # audit / evidence only — not executable
+    "ExecutionPlan",  # audit / evidence only — not executable
     "ExecutionResult",
     "AllowedRequest",
     "DeniedRequest",
     "Evidence",
     "AuditEvent",
-
     # ── Typed IR ──────────────────────────────────────────────────────────
     "ResourceRef",
     "FieldRef",
@@ -149,7 +147,6 @@ __all__ = [
     "Filter",
     "Projection",
     "RowLimit",
-
     # ── Policy ────────────────────────────────────────────────────────────
     "DataFencePolicyEngine",
     "DataFencePolicy",
@@ -159,14 +156,12 @@ __all__ = [
     "PolicyEffect",
     "YAMLPolicyLoader",
     "create_banking_policy",
-
     # ── Registry ──────────────────────────────────────────────────────────
     "ResourceRegistry",
     "ResourceDefinition",
     "FieldDefinition",
     "DataClassification",
     "create_banking_registry",
-
     # ── Errors ────────────────────────────────────────────────────────────
     "CapabilityVerificationError",
     "DataFenceError",

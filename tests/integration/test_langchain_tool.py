@@ -3,8 +3,8 @@ Tests for LangChain integration.
 """
 
 import json
+
 import pytest
-from unittest.mock import Mock
 
 from datafence import DataFence
 from datafence.connectors import MemoryConnector
@@ -106,9 +106,7 @@ async def test_datafence_tool_arun(fence):
     actor = {"id": "test", "tenant_id": "acme"}
     tool = DataFenceTool(fence=fence, actor=actor)
 
-    result = await tool._arun(
-        resource="transactions", fields=["id", "amount"], limit=10
-    )
+    result = await tool._arun(resource="transactions", fields=["id", "amount"], limit=10)
 
     result_dict = json.loads(result)
     assert result_dict["success"] is True
@@ -155,7 +153,7 @@ def test_resource_specific_tool_run(fence):
 def test_create_tools_no_resources(sample_data):
     """Test creating tools when policy has no resources."""
     # Create policy with no resources
-    from datafence.policy.models import Policy, ResourceConfig
+    from datafence.policy.models import Policy
 
     policy = Policy(name="empty", resources={})
 
@@ -191,4 +189,4 @@ def test_import_error_handling():
 
     # Should raise ImportError when trying to use without LangChain
     with pytest.raises(ImportError):
-        from datafence.integrations.langchain_tool import create_datafence_tools
+        pass

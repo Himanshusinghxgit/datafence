@@ -3,18 +3,18 @@ Tests for DataFence execution engine.
 """
 
 import pytest
-
-from datafence import DataFence, Operation
-from datafence.audit.logger import MemoryAuditLogger
 from datafence.connectors.memory import MemoryConnector
 from datafence.core.decision import DecisionStatus
-from datafence.errors import PolicyDeniedError
 from datafence.policy.models import (
     FieldPolicy,
     OperationPolicy,
     Policy,
     ResourcePolicy,
 )
+
+from datafence import DataFence, Operation
+from datafence.audit.logger import MemoryAuditLogger
+from datafence.errors import PolicyDeniedError
 
 
 @pytest.fixture

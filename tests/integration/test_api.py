@@ -2,12 +2,11 @@
 Tests for REST API.
 """
 
-import json
 import pytest
-from unittest.mock import Mock, patch
 
 try:
     from fastapi.testclient import TestClient
+
     from datafence.api import create_api
 
     API_AVAILABLE = True
@@ -288,4 +287,4 @@ def test_api_missing_dependencies():
         pytest.skip("API is available")
 
     with pytest.raises(ImportError):
-        from datafence.api import create_api
+        pass

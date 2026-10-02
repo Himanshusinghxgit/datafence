@@ -87,8 +87,7 @@ class PostgreSQLConnector:
         """
         if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
-                f"Invalid capability signature for execution "
-                f"{capability.execution_id!r}."
+                f"Invalid capability signature for execution {capability.execution_id!r}."
             )
         if capability.is_expired():
             raise CapabilityVerificationError(
@@ -104,7 +103,7 @@ class PostgreSQLConnector:
 
         authorised = set(capability.selected_fields)
         return [
-            {col: val for col, val in zip(columns, row) if col in authorised}
+            {col: val for col, val in zip(columns, row, strict=False) if col in authorised}
             for row in rows
         ]
 
@@ -112,18 +111,12 @@ class PostgreSQLConnector:
     # SQL compiler
     # ------------------------------------------------------------------
 
-    def _compile(
-        self, capability: AuthorizedExecution
-    ) -> tuple[str, list[Any]]:
+    def _compile(self, capability: AuthorizedExecution) -> tuple[str, list[Any]]:
         if capability.operation == Operation.READ:
             return self._compile_select(capability)
-        raise NotImplementedError(
-            f"Operation {capability.operation!r} not implemented"
-        )
+        raise NotImplementedError(f"Operation {capability.operation!r} not implemented")
 
-    def _compile_select(
-        self, capability: AuthorizedExecution
-    ) -> tuple[str, list[Any]]:
+    def _compile_select(self, capability: AuthorizedExecution) -> tuple[str, list[Any]]:
         """
         Compile a parameterised SELECT for PostgreSQL.
 
@@ -157,7 +150,7 @@ class PostgreSQLConnector:
         if self._conn:
             self._conn.close()
 
-    def __enter__(self) -> "PostgreSQLConnector":
+    def __enter__(self) -> PostgreSQLConnector:
         return self
 
     def __exit__(self, *_: Any) -> None:

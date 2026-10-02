@@ -6,11 +6,10 @@ Uses sqlparse for proper SQL parsing (not regex).
 """
 
 from enum import Enum
-from typing import Any
 
 import sqlparse
 from sqlparse import sql
-from sqlparse.tokens import Keyword, DML, DDL
+from sqlparse.tokens import DDL, DML, Keyword
 
 from datafence.errors import ValidationError
 

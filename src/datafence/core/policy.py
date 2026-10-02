@@ -51,7 +51,6 @@ The YAML schema understood by YAMLPolicyLoader is:
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -63,24 +62,25 @@ from datafence.core.resources import (
     Predicate,
     PredicateOperator,
     Projection,
-    ResourceRef,
     RowLimit,
     validate_identifier,
 )
-
 
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
 
+
 class ActionDecision(Enum):
     """Whether an action is allowed or denied."""
+
     ALLOW = "allow"
     DENY = "deny"
 
 
 class PolicyEffect(Enum):
     """Final policy evaluation effect."""
+
     ALLOW = "allow"
     DENY = "deny"
 
@@ -88,6 +88,7 @@ class PolicyEffect(Enum):
 # ---------------------------------------------------------------------------
 # Policy data model
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RowRule:
@@ -98,6 +99,7 @@ class RowRule:
     operator: comparison operator (default EQ)
     value:    literal or actor-attribute reference (e.g. ":actor_tenant_id")
     """
+
     field: str
     operator: PredicateOperator = PredicateOperator.EQ
     value: Any = None
@@ -117,6 +119,7 @@ class ResourcePolicy:
 
     This is the richer replacement for the old SimplePolicyEngine ResourcePolicy.
     """
+
     resource: str
 
     # Operation-level rules  {operation_name: ActionDecision}
@@ -160,8 +163,7 @@ class ResourcePolicy:
         """
         if requested:
             safe = [
-                f for f in requested
-                if f in self.allowed_fields and f not in self.denied_fields
+                f for f in requested if f in self.allowed_fields and f not in self.denied_fields
             ]
         else:
             safe = [f for f in self.allowed_fields if f not in self.denied_fields]
@@ -173,6 +175,7 @@ class DataFencePolicy:
     """
     A complete policy document covering one or more resources.
     """
+
     name: str
     version: str
     resources: dict[str, ResourcePolicy] = field(default_factory=dict)
@@ -184,6 +187,7 @@ class DataFencePolicy:
 # ---------------------------------------------------------------------------
 # PolicyDecision — carries the full authorization decision
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class PolicyDecision:
@@ -200,6 +204,7 @@ class PolicyDecision:
     matched_rules:   list of rule identifiers that fired
     obligations:     post-execution requirements (e.g. {"audit": True})
     """
+
     effect: PolicyEffect
     reasons: tuple[str, ...] = ()
     policy_name: str = "unknown"
@@ -225,8 +230,9 @@ class PolicyDecision:
     # ------------------------------------------------------------------
 
     @classmethod
-    def deny(cls, reasons: list[str], policy_name: str = "unknown",
-             policy_version: str = "unknown") -> "PolicyDecision":
+    def deny(
+        cls, reasons: list[str], policy_name: str = "unknown", policy_version: str = "unknown"
+    ) -> PolicyDecision:
         return cls(
             effect=PolicyEffect.DENY,
             reasons=tuple(reasons),
@@ -244,7 +250,7 @@ class PolicyDecision:
         policy_version: str = "unknown",
         matched_rules: list[str] | None = None,
         obligations: dict[str, Any] | None = None,
-    ) -> "PolicyDecision":
+    ) -> PolicyDecision:
         return cls(
             effect=PolicyEffect.ALLOW,
             policy_name=policy_name,
@@ -260,6 +266,7 @@ class PolicyDecision:
 # ---------------------------------------------------------------------------
 # PolicyEngine protocol + concrete implementation
 # ---------------------------------------------------------------------------
+
 
 class PolicyEngine:
     """
@@ -324,8 +331,10 @@ class DataFencePolicyEngine(PolicyEngine):
         return self._registry
 
     def evaluate(
-        self, principal: Any, intent: Any,
-    ) -> "PolicyDecision":
+        self,
+        principal: Any,
+        intent: Any,
+    ) -> PolicyDecision:
         """
         Evaluate one untrusted intent for one trusted principal.
 
@@ -337,7 +346,7 @@ class DataFencePolicyEngine(PolicyEngine):
         requested_fields = intent.fields or []
 
         # Normalise operation to lowercase string
-        if hasattr(operation, 'value'):
+        if hasattr(operation, "value"):
             action = operation.value.lower()
         else:
             action = str(operation).lower()
@@ -523,11 +532,13 @@ class YAMLPolicyLoader:
         for rule in data.get("rows") or []:
             op_str = rule.get("operator", "equals").lower()
             op = _OP_MAP.get(op_str, PredicateOperator.EQ)
-            row_rules.append(RowRule(
-                field=rule["field"],
-                operator=op,
-                value=rule["value"],
-            ))
+            row_rules.append(
+                RowRule(
+                    field=rule["field"],
+                    operator=op,
+                    value=rule["value"],
+                )
+            )
 
         # Limits
         limits_data = data.get("limits") or {}
@@ -547,7 +558,7 @@ class YAMLPolicyLoader:
         )
 
 
-def create_banking_policy() -> "DataFencePolicyEngine":
+def create_banking_policy() -> DataFencePolicyEngine:
     """
     Create the banking demo policy using the Phase-3 model.
 
@@ -556,8 +567,11 @@ def create_banking_policy() -> "DataFencePolicyEngine":
     The banking registry is mandatory for the returned policy engine.
     """
     from datafence.core.policy import (
-        ActionDecision, DataFencePolicy, DataFencePolicyEngine,
-        ResourcePolicy, RowRule,
+        ActionDecision,
+        DataFencePolicy,
+        DataFencePolicyEngine,
+        ResourcePolicy,
+        RowRule,
     )
     from datafence.core.resources import PredicateOperator
 
@@ -619,5 +633,6 @@ def create_banking_policy() -> "DataFencePolicyEngine":
         },
     )
     from datafence.core.registry import create_banking_registry
+
     registry = create_banking_registry()
     return DataFencePolicyEngine(policy, registry=registry)

@@ -2,15 +2,16 @@
 Tests for Anthropic Claude adapter.
 """
 
-import pytest
 from unittest.mock import Mock, patch
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
+import pytest
 from datafence.integrations.anthropic_adapter import (
     ClaudeAdapter,
     create_claude_agent,
 )
+
+from datafence import DataFence
+from datafence.connectors import MemoryConnector
 
 
 @pytest.fixture
@@ -125,7 +126,7 @@ def test_execute_tool_unsupported(fence):
 
     actor = {"id": "test", "tenant_id": "acme"}
 
-    with pytest.raises(Exception):
+    with pytest.raises((KeyError, ValueError)):
         adapter.execute_tool(tool_name, tool_input, actor)
 
 

@@ -8,7 +8,6 @@ import pytest
 
 from datafence import Actor, DataFenceBoundary, Intent, Operation, create_banking_policy
 from datafence.connectors.sqlite_connector import SQLiteConnector, create_demo_database
-from datafence.core.boundary import DataFenceBoundary
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 
 

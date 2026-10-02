@@ -5,9 +5,8 @@ Prometheus-compatible metrics for monitoring DataFence in production.
 """
 
 import time
-from typing import Any
-from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -34,7 +33,9 @@ class Histogram:
 
     name: str
     help: str
-    buckets: list[float] = field(default_factory=lambda: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+    buckets: list[float] = field(
+        default_factory=lambda: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+    )
     values: list[float] = field(default_factory=list)
     labels: dict[str, str] = field(default_factory=dict)
 
@@ -47,7 +48,7 @@ class Histogram:
         bucket_counts = {}
         for bucket in self.buckets:
             bucket_counts[bucket] = sum(1 for v in self.values if v <= bucket)
-        bucket_counts[float('inf')] = len(self.values)
+        bucket_counts[float("inf")] = len(self.values)
         return bucket_counts
 
     def get_sum(self) -> float:
@@ -127,7 +128,9 @@ class MetricsCollector:
         self._counters[name] = counter
         return counter
 
-    def register_histogram(self, name: str, help: str, buckets: list[float] | None = None) -> Histogram:
+    def register_histogram(
+        self, name: str, help: str, buckets: list[float] | None = None
+    ) -> Histogram:
         """Register a histogram metric."""
         histogram = Histogram(
             name=name,
@@ -229,7 +232,7 @@ class MetricsCollector:
             # Bucket counts
             buckets = hist.get_buckets()
             for bucket, count in sorted(buckets.items()):
-                if bucket == float('inf'):
+                if bucket == float("inf"):
                     lines.append(f'{name}_bucket{{le="+Inf"}} {count}')
                 else:
                     lines.append(f'{name}_bucket{{le="{bucket}"}} {count}')
@@ -247,7 +250,7 @@ class MetricsCollector:
         for name, counter in self._counters.items():
             metrics["counters"][name] = counter.get()
 
-        for name, hist in self._histograms.items():
+        for name, _hist in self._histograms.items():
             metrics["histograms"][name] = self.get_histogram_stats(name)
 
         return metrics
@@ -294,7 +297,7 @@ class MetricsMiddleware:
             allowed = result.verified
             return result
 
-        except Exception as e:
+        except Exception:
             error = True
             raise
 

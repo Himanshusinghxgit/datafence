@@ -7,7 +7,8 @@ Caching, memoization, and performance helpers.
 import functools
 import hashlib
 import json
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 
 class SchemaCache:
@@ -150,8 +151,8 @@ def measure_time(func: Callable) -> Callable:
         def expensive_function():
             ...
     """
-    import time
     import logging
+    import time
 
     logger = logging.getLogger(__name__)
 

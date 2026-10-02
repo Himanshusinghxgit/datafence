@@ -3,16 +3,15 @@ Integration tests for SQL firewall in DataFence engine.
 """
 
 import pytest
-
-from datafence import DataFence
 from datafence.connectors.memory import MemoryConnector
-from datafence.errors import PolicyDeniedError
 from datafence.policy.models import (
     FieldPolicy,
     OperationPolicy,
     Policy,
     ResourcePolicy,
 )
+
+from datafence import DataFence
 
 
 @pytest.fixture

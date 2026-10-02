@@ -20,7 +20,7 @@ eliminating a whole class of identifier-injection vulnerabilities.
 
 Before this change, the SQLite connector could build:
     SELECT {fields} FROM {resource}          ← f-string, unsafe identifiers
-    
+
 After this change, the connector receives a typed Projection and ResourceRef,
 and the SQL compiler validates every identifier against an allowlist before
 interpolating it into the query.
@@ -29,16 +29,15 @@ interpolating it into the query.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
-
 
 # ---------------------------------------------------------------------------
 # Safe identifier validation
 # ---------------------------------------------------------------------------
 
-_SAFE_IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def validate_identifier(name: str, context: str = "identifier") -> str:
@@ -52,8 +51,7 @@ def validate_identifier(name: str, context: str = "identifier") -> str:
     """
     if not _SAFE_IDENTIFIER.match(name):
         raise ValueError(
-            f"Unsafe {context}: {name!r}. "
-            "Identifiers must match [A-Za-z_][A-Za-z0-9_]*"
+            f"Unsafe {context}: {name!r}. Identifiers must match [A-Za-z_][A-Za-z0-9_]*"
         )
     return name
 
@@ -61,6 +59,7 @@ def validate_identifier(name: str, context: str = "identifier") -> str:
 # ---------------------------------------------------------------------------
 # Core IR types
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ResourceRef:
@@ -90,7 +89,7 @@ class ResourceRef:
         return self.name
 
     @classmethod
-    def from_string(cls, s: str) -> "ResourceRef":
+    def from_string(cls, s: str) -> ResourceRef:
         """Parse "namespace.name" or plain "name"."""
         parts = s.split(".", 1)
         if len(parts) == 2:
@@ -118,7 +117,7 @@ class FieldRef:
         validate_identifier(self.name, context="field name")
 
     @classmethod
-    def from_string(cls, s: str) -> "FieldRef":
+    def from_string(cls, s: str) -> FieldRef:
         """Parse "resource.field" or plain "field"."""
         parts = s.split(".", 1)
         if len(parts) == 2:
@@ -169,7 +168,7 @@ class Predicate:
         """Return True if value is an actor-attribute placeholder."""
         return isinstance(self.value, str) and self.value.startswith(":")
 
-    def resolve(self, principal: Any) -> "Predicate":
+    def resolve(self, principal: Any) -> Predicate:
         """
         Resolve actor-attribute references using the provided principal.
 
@@ -184,7 +183,7 @@ class Predicate:
             return Predicate(self.field, self.operator, principal.id)
         # Try arbitrary attribute access: ":actor.department" → principal.attributes["department"]
         if ref.startswith(":actor."):
-            attr_name = ref[len(":actor."):]
+            attr_name = ref[len(":actor.") :]
             attr_val = getattr(principal, attr_name, None)
             if attr_val is None:
                 attr_val = principal.attributes.get(attr_name)
@@ -211,11 +210,11 @@ class Filter:
         return bool(self.predicates)
 
     @classmethod
-    def empty(cls) -> "Filter":
+    def empty(cls) -> Filter:
         return cls(predicates=())
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Filter":
+    def from_dict(cls, d: dict[str, Any]) -> Filter:
         """
         Build a Filter from a legacy ``{field: value}`` dict.
 
@@ -240,23 +239,18 @@ class Filter:
                 result[pred.field.name] = pred.value
         return result
 
-    def merge(self, other: "Filter") -> "Filter":
+    def merge(self, other: Filter) -> Filter:
         """
         Merge two filters, deduplicating on field name (self takes priority).
         Used to merge policy-enforced filters with intent-provided filters.
         """
         existing_fields = {p.field.name for p in self.predicates}
-        added = tuple(
-            p for p in other.predicates
-            if p.field.name not in existing_fields
-        )
+        added = tuple(p for p in other.predicates if p.field.name not in existing_fields)
         return Filter(predicates=self.predicates + added)
 
-    def resolve(self, principal: Any) -> "Filter":
+    def resolve(self, principal: Any) -> Filter:
         """Resolve all actor-attribute references in the predicates."""
-        return Filter(
-            predicates=tuple(p.resolve(principal) for p in self.predicates)
-        )
+        return Filter(predicates=tuple(p.resolve(principal) for p in self.predicates))
 
 
 @dataclass(frozen=True)
@@ -270,7 +264,7 @@ class Projection:
     fields: tuple[FieldRef, ...]
 
     @classmethod
-    def from_strings(cls, names: list[str]) -> "Projection":
+    def from_strings(cls, names: list[str]) -> Projection:
         return cls(fields=tuple(FieldRef(name=n) for n in names))
 
     def field_names(self) -> list[str]:
@@ -294,7 +288,7 @@ class RowLimit:
             raise ValueError(f"RowLimit must be positive, got {self.value}")
 
     @classmethod
-    def default(cls) -> "RowLimit":
+    def default(cls) -> RowLimit:
         return cls(value=100)
 
 

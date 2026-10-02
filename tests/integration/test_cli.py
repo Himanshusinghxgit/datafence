@@ -3,12 +3,12 @@ Tests for CLI tool.
 """
 
 import json
+
 import pytest
-from pathlib import Path
 from click.testing import CliRunner
 
 try:
-    from datafence.cli import cli, validate, describe, test, export, init
+    from datafence.cli import cli, describe, export, init, test, validate
 
     CLI_AVAILABLE = True
 except ImportError:
@@ -112,9 +112,7 @@ def test_describe_resource(runner, sample_policy):
 @pytest.mark.skipif(not CLI_AVAILABLE, reason="CLI dependencies not installed")
 def test_describe_resource_json(runner, sample_policy):
     """Test describing resource with JSON output."""
-    result = runner.invoke(
-        describe, [str(sample_policy), "-r", "transactions", "--format", "json"]
-    )
+    result = runner.invoke(describe, [str(sample_policy), "-r", "transactions", "--format", "json"])
     assert result.exit_code == 0
 
     output = json.loads(result.output)
@@ -134,9 +132,7 @@ def test_describe_missing_resource(runner, sample_policy):
 @pytest.mark.skipif(not CLI_AVAILABLE, reason="CLI dependencies not installed")
 def test_test_dry_run(runner, sample_policy, sample_request):
     """Test request with dry-run."""
-    result = runner.invoke(
-        test, [str(sample_policy), str(sample_request), "--dry-run"]
-    )
+    result = runner.invoke(test, [str(sample_policy), str(sample_request), "--dry-run"])
     assert result.exit_code == 0
     assert "Dry-run" in result.output or "dry" in result.output.lower()
 
@@ -153,9 +149,7 @@ def test_test_dry_run_verbose(runner, sample_policy, sample_request):
 @pytest.mark.skipif(not CLI_AVAILABLE, reason="CLI dependencies not installed")
 def test_test_memory_connector(runner, sample_policy, sample_request):
     """Test request with memory connector."""
-    result = runner.invoke(
-        test, [str(sample_policy), str(sample_request), "--connector", "memory"]
-    )
+    result = runner.invoke(test, [str(sample_policy), str(sample_request), "--connector", "memory"])
     # May fail because no data in memory connector, but should not crash
     assert "error" in result.output.lower() or "denied" in result.output.lower()
 
@@ -220,4 +214,4 @@ def test_cli_missing_dependencies():
         pytest.skip("CLI is available")
 
     with pytest.raises(ImportError):
-        from datafence.cli import cli
+        pass

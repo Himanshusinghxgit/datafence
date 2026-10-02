@@ -2,8 +2,6 @@
 Tests for PII detection and redaction.
 """
 
-import pytest
-
 from datafence.security.pii import (
     APIKeyDetector,
     CreditCardDetector,

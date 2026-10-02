@@ -186,8 +186,8 @@ def test_extract_tables_from_select():
 def test_extract_tables_from_join():
     """Test extracting tables from JOIN."""
     query = """
-        SELECT u.id, p.name 
-        FROM users u 
+        SELECT u.id, p.name
+        FROM users u
         JOIN profiles p ON u.id = p.user_id
     """
     tables = extract_tables(query)

@@ -40,12 +40,13 @@ from datafence.core.resources import validate_identifier
 
 class DataClassification(Enum):
     """Sensitivity classification for a field."""
-    PUBLIC       = "public"
-    INTERNAL     = "internal"
-    CONFIDENTIAL = "confidential"
-    RESTRICTED   = "restricted"
 
-    def is_more_sensitive_than(self, other: "DataClassification") -> bool:
+    PUBLIC = "public"
+    INTERNAL = "internal"
+    CONFIDENTIAL = "confidential"
+    RESTRICTED = "restricted"
+
+    def is_more_sensitive_than(self, other: DataClassification) -> bool:
         _rank = {
             DataClassification.PUBLIC: 0,
             DataClassification.INTERNAL: 1,
@@ -69,6 +70,7 @@ class FieldDefinition:
     nullable       : Whether the field can be NULL.
     description    : Human-readable description.
     """
+
     name: str
     data_type: str = "string"
     classification: DataClassification = DataClassification.INTERNAL
@@ -89,6 +91,7 @@ class ResourceDefinition:
     description : Human-readable description.
     tags        : Arbitrary string tags for grouping/filtering.
     """
+
     name: str
     fields: dict[str, FieldDefinition] = field(default_factory=dict)
     description: str = ""
@@ -115,19 +118,16 @@ class ResourceDefinition:
                 return f.name
         return None
 
-    def fields_by_classification(
-        self, classification: DataClassification
-    ) -> list[str]:
-        return [
-            n for n, f in self.fields.items()
-            if f.classification == classification
-        ]
+    def fields_by_classification(self, classification: DataClassification) -> list[str]:
+        return [n for n, f in self.fields.items() if f.classification == classification]
 
     def sensitive_fields(self) -> list[str]:
         """Return fields classified as CONFIDENTIAL or RESTRICTED."""
         return [
-            n for n, f in self.fields.items()
-            if f.classification in (
+            n
+            for n, f in self.fields.items()
+            if f.classification
+            in (
                 DataClassification.CONFIDENTIAL,
                 DataClassification.RESTRICTED,
             )
@@ -240,6 +240,7 @@ class ResourceRegistry:
 # Banking demo registry — mirrors the demo database schema
 # ---------------------------------------------------------------------------
 
+
 def create_banking_registry() -> ResourceRegistry:
     """
     Create the resource registry for the banking demo.
@@ -248,51 +249,76 @@ def create_banking_registry() -> ResourceRegistry:
     """
     registry = ResourceRegistry()
 
-    registry.register(ResourceDefinition(
-        name="transactions",
-        description="Financial transaction ledger",
-        fields={
-            "id":          FieldDefinition("id",          "integer", DataClassification.INTERNAL),
-            "tenant_id":   FieldDefinition("tenant_id",   "string",  DataClassification.INTERNAL,
-                                           is_tenant_key=True),
-            "customer_id": FieldDefinition("customer_id", "integer", DataClassification.INTERNAL),
-            "merchant":    FieldDefinition("merchant",    "string",  DataClassification.PUBLIC),
-            "amount":      FieldDefinition("amount",      "decimal", DataClassification.CONFIDENTIAL),
-            "timestamp":   FieldDefinition("timestamp",   "string",  DataClassification.INTERNAL),
-            "card_number": FieldDefinition("card_number", "string",  DataClassification.RESTRICTED,
-                                           description="Primary account number — PCI DSS restricted"),
-        },
-        tags=["financial", "pci"],
-    ))
+    registry.register(
+        ResourceDefinition(
+            name="transactions",
+            description="Financial transaction ledger",
+            fields={
+                "id": FieldDefinition("id", "integer", DataClassification.INTERNAL),
+                "tenant_id": FieldDefinition(
+                    "tenant_id", "string", DataClassification.INTERNAL, is_tenant_key=True
+                ),
+                "customer_id": FieldDefinition(
+                    "customer_id", "integer", DataClassification.INTERNAL
+                ),
+                "merchant": FieldDefinition("merchant", "string", DataClassification.PUBLIC),
+                "amount": FieldDefinition("amount", "decimal", DataClassification.CONFIDENTIAL),
+                "timestamp": FieldDefinition("timestamp", "string", DataClassification.INTERNAL),
+                "card_number": FieldDefinition(
+                    "card_number",
+                    "string",
+                    DataClassification.RESTRICTED,
+                    description="Primary account number — PCI DSS restricted",
+                ),
+            },
+            tags=["financial", "pci"],
+        )
+    )
 
-    registry.register(ResourceDefinition(
-        name="customers",
-        description="Customer identity records",
-        fields={
-            "id":             FieldDefinition("id",             "integer", DataClassification.INTERNAL),
-            "tenant_id":      FieldDefinition("tenant_id",      "string",  DataClassification.INTERNAL,
-                                              is_tenant_key=True),
-            "name":           FieldDefinition("name",           "string",  DataClassification.CONFIDENTIAL),
-            "email":          FieldDefinition("email",          "string",  DataClassification.CONFIDENTIAL),
-            "ssn":            FieldDefinition("ssn",            "string",  DataClassification.RESTRICTED,
-                                              description="Social Security Number — PII restricted"),
-            "account_number": FieldDefinition("account_number", "string",  DataClassification.RESTRICTED),
-        },
-        tags=["pii", "gdpr"],
-    ))
+    registry.register(
+        ResourceDefinition(
+            name="customers",
+            description="Customer identity records",
+            fields={
+                "id": FieldDefinition("id", "integer", DataClassification.INTERNAL),
+                "tenant_id": FieldDefinition(
+                    "tenant_id", "string", DataClassification.INTERNAL, is_tenant_key=True
+                ),
+                "name": FieldDefinition("name", "string", DataClassification.CONFIDENTIAL),
+                "email": FieldDefinition("email", "string", DataClassification.CONFIDENTIAL),
+                "ssn": FieldDefinition(
+                    "ssn",
+                    "string",
+                    DataClassification.RESTRICTED,
+                    description="Social Security Number — PII restricted",
+                ),
+                "account_number": FieldDefinition(
+                    "account_number", "string", DataClassification.RESTRICTED
+                ),
+            },
+            tags=["pii", "gdpr"],
+        )
+    )
 
-    registry.register(ResourceDefinition(
-        name="accounts",
-        description="Financial account records",
-        fields={
-            "id":             FieldDefinition("id",             "integer", DataClassification.INTERNAL),
-            "tenant_id":      FieldDefinition("tenant_id",      "string",  DataClassification.INTERNAL,
-                                              is_tenant_key=True),
-            "customer_id":    FieldDefinition("customer_id",    "integer", DataClassification.INTERNAL),
-            "account_number": FieldDefinition("account_number", "string",  DataClassification.RESTRICTED),
-            "balance":        FieldDefinition("balance",        "decimal", DataClassification.RESTRICTED),
-        },
-        tags=["financial"],
-    ))
+    registry.register(
+        ResourceDefinition(
+            name="accounts",
+            description="Financial account records",
+            fields={
+                "id": FieldDefinition("id", "integer", DataClassification.INTERNAL),
+                "tenant_id": FieldDefinition(
+                    "tenant_id", "string", DataClassification.INTERNAL, is_tenant_key=True
+                ),
+                "customer_id": FieldDefinition(
+                    "customer_id", "integer", DataClassification.INTERNAL
+                ),
+                "account_number": FieldDefinition(
+                    "account_number", "string", DataClassification.RESTRICTED
+                ),
+                "balance": FieldDefinition("balance", "decimal", DataClassification.RESTRICTED),
+            },
+            tags=["financial"],
+        )
+    )
 
     return registry

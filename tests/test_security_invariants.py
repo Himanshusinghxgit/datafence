@@ -46,10 +46,10 @@ from datafence.core.types import (
     Operation,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def signing_key():
@@ -82,13 +82,14 @@ def boundary(db_path):
 # Invariant 1 — Unauthorized field never reaches connector
 # ---------------------------------------------------------------------------
 
+
 def test_unauthorized_field_rejected_before_connector(boundary):
     """An unauthorized field request is denied — database never queried."""
     actor = Actor(id="u", tenant_id="tenant_a")
     intent = Intent(
         resource="transactions",
         operation=Operation.READ,
-        fields=["id", "card_number"],   # card_number is denied
+        fields=["id", "card_number"],  # card_number is denied
     )
     result = boundary.execute(actor, intent)
     assert isinstance(result, DeniedRequest)
@@ -98,6 +99,7 @@ def test_unauthorized_field_rejected_before_connector(boundary):
 # ---------------------------------------------------------------------------
 # Invariant 2 — SELECT * returns only authorized fields
 # ---------------------------------------------------------------------------
+
 
 def test_select_all_restricted_to_authorized_fields(boundary):
     """SELECT * (fields=None) returns only policy-allowed fields."""
@@ -117,14 +119,14 @@ def test_select_all_restricted_to_authorized_fields(boundary):
 # Invariant 3 — Tenant isolation
 # ---------------------------------------------------------------------------
 
+
 def test_tenant_a_cannot_see_tenant_b_data(boundary):
     """tenant_a actor only receives tenant_a rows."""
     actor = Actor(id="u", tenant_id="tenant_a")
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"])
+    intent = Intent(resource="transactions", operation=Operation.READ, fields=["id", "merchant"])
     result = boundary.execute(actor, intent)
     assert isinstance(result, AllowedRequest)
-    assert result.execution_result.row_count == 3   # only tenant_a rows
+    assert result.execution_result.row_count == 3  # only tenant_a rows
     # enforced filter must be present
     assert result.execution_plan.enforced_filters.get("tenant_id") == "tenant_a"
 
@@ -133,21 +135,25 @@ def test_tenant_filter_injected_even_without_llm_filter(boundary):
     """Policy injects tenant_id filter regardless of what the LLM requested."""
     actor = Actor(id="u", tenant_id="tenant_b")
     # LLM provides NO tenant filter
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"], filters={})
+    intent = Intent(
+        resource="transactions", operation=Operation.READ, fields=["id", "merchant"], filters={}
+    )
     result = boundary.execute(actor, intent)
     assert isinstance(result, AllowedRequest)
     # Enforced filter must be present with correct tenant
     assert result.execution_plan.enforced_filters.get("tenant_id") == "tenant_b"
-    assert result.execution_result.row_count == 3   # only tenant_b rows
+    assert result.execution_result.row_count == 3  # only tenant_b rows
 
 
 def test_llm_cannot_override_tenant_filter(boundary):
     """LLM-supplied tenant filter is overridden by policy."""
     actor = Actor(id="u", tenant_id="tenant_a")
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"],
-                    filters={"tenant_id": "tenant_b"})   # attack
+    intent = Intent(
+        resource="transactions",
+        operation=Operation.READ,
+        fields=["id", "merchant"],
+        filters={"tenant_id": "tenant_b"},
+    )  # attack
     result = boundary.execute(actor, intent)
     assert isinstance(result, AllowedRequest)
     # Policy filter wins — tenant_a's filter, not the LLM's
@@ -160,10 +166,12 @@ def test_llm_cannot_override_tenant_filter(boundary):
 # Invariant 4 — Forged capability rejected
 # ---------------------------------------------------------------------------
 
+
 def test_forged_capability_rejected_by_connector(signing_key, db_path):
     """A capability with an invalid HMAC is rejected."""
     connector = create_demo_database(db_path, signing_key)
     from datetime import datetime
+
     forged = AuthorizedExecution(
         execution_id="forged_001",
         created_at=datetime.utcnow(),
@@ -185,6 +193,7 @@ def test_forged_capability_rejected_by_connector(signing_key, db_path):
 # ---------------------------------------------------------------------------
 # Invariant 5 — Mutated capability rejected
 # ---------------------------------------------------------------------------
+
 
 def test_mutated_capability_rejected(signing_key, db_path):
     """Mutating a valid capability after signing invalidates the HMAC."""
@@ -216,17 +225,20 @@ def test_mutated_capability_rejected(signing_key, db_path):
 # Invariant 6 — No execute_plan() method
 # ---------------------------------------------------------------------------
 
+
 def test_no_execute_plan_on_connector(signing_key, db_path):
     """v0.5 connector has no execute_plan() method — bypass vector removed."""
     connector = SQLiteConnector(db_path, signing_key)
-    assert not hasattr(connector, "execute_plan"), \
+    assert not hasattr(connector, "execute_plan"), (
         "execute_plan() must not exist — it was the v0.3 bypass vector"
+    )
     connector.close()
 
 
 # ---------------------------------------------------------------------------
 # Invariant 7 — No raw SQL execution path
 # ---------------------------------------------------------------------------
+
 
 def test_no_execute_sql_on_connector(signing_key, db_path):
     """v0.5 connector has no execute_sql() or execute_raw() method."""
@@ -239,6 +251,7 @@ def test_no_execute_sql_on_connector(signing_key, db_path):
 # ---------------------------------------------------------------------------
 # Invariant 8 — Result validation catches rogue connector
 # ---------------------------------------------------------------------------
+
 
 def test_result_validation_blocks_rogue_connector(db_path):
     """Even a compromised connector cannot return unauthorized fields."""
@@ -254,8 +267,7 @@ def test_result_validation_blocks_rogue_connector(db_path):
     )
 
     actor = Actor(id="u", tenant_id="tenant_a")
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"])
+    intent = Intent(resource="transactions", operation=Operation.READ, fields=["id", "merchant"])
     result = boundary.execute(actor, intent)
 
     # Result validation must catch the injected card_number/ssn
@@ -267,6 +279,7 @@ def test_result_validation_blocks_rogue_connector(db_path):
 # ---------------------------------------------------------------------------
 # Invariant 9 — Destructive operation denied
 # ---------------------------------------------------------------------------
+
 
 def test_delete_denied_before_connector(boundary):
     """DELETE operation is denied by policy before reaching the database."""
@@ -288,12 +301,12 @@ def test_insert_denied_before_connector(boundary):
 # Invariant 10 — Actor fixed by host, LLM cannot change it
 # ---------------------------------------------------------------------------
 
+
 def test_actor_tenant_id_determines_data_scope(boundary):
     """The Actor.tenant_id set by the host determines what data is returned."""
     actor_a = Actor(id="agent", tenant_id="tenant_a")
     actor_b = Actor(id="agent", tenant_id="tenant_b")
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"])
+    intent = Intent(resource="transactions", operation=Operation.READ, fields=["id", "merchant"])
 
     result_a = boundary.execute(actor_a, intent)
     result_b = boundary.execute(actor_b, intent)
@@ -310,6 +323,7 @@ def test_actor_tenant_id_determines_data_scope(boundary):
 # ---------------------------------------------------------------------------
 # Invariant 11 — Policy evaluated exactly once (no double evaluation)
 # ---------------------------------------------------------------------------
+
 
 def test_policy_evaluated_exactly_once(db_path):
     """Policy engine's evaluate() is called exactly once per boundary.execute()."""
@@ -331,23 +345,22 @@ def test_policy_evaluated_exactly_once(db_path):
     create_demo_database(db_path, b._signing_key)
 
     call_count["n"] = 0
-    b.execute(Actor(id="u", tenant_id="tenant_a"),
-              Intent(resource="transactions", operation=Operation.READ,
-                     fields=["id", "merchant"]))
-    assert call_count["n"] == 1, (
-        f"Policy evaluated {call_count['n']} times — must be exactly 1"
+    b.execute(
+        Actor(id="u", tenant_id="tenant_a"),
+        Intent(resource="transactions", operation=Operation.READ, fields=["id", "merchant"]),
     )
+    assert call_count["n"] == 1, f"Policy evaluated {call_count['n']} times — must be exactly 1"
 
 
 # ---------------------------------------------------------------------------
 # Invariant 12 — AllowedRequest carries Evidence + unique execution_id
 # ---------------------------------------------------------------------------
 
+
 def test_allowed_request_has_evidence_and_unique_id(boundary):
     """Every AllowedRequest carries Evidence with a unique execution_id."""
     actor = Actor(id="u", tenant_id="tenant_a")
-    intent = Intent(resource="transactions", operation=Operation.READ,
-                    fields=["id", "merchant"])
+    intent = Intent(resource="transactions", operation=Operation.READ, fields=["id", "merchant"])
 
     r1 = boundary.execute(actor, intent)
     r2 = boundary.execute(actor, intent)
@@ -365,6 +378,7 @@ def test_allowed_request_has_evidence_and_unique_id(boundary):
 # Invariant 13 — DeniedRequest carries Evidence and reasons
 # ---------------------------------------------------------------------------
 
+
 def test_denied_request_has_evidence_and_reasons(boundary):
     """Every DeniedRequest carries Evidence and at least one denial reason."""
     actor = Actor(id="u", tenant_id="tenant_a")
@@ -380,12 +394,14 @@ def test_denied_request_has_evidence_and_reasons(boundary):
 # Invariant 14 — DataFenceBoundary.execute() is the only public entry point
 # ---------------------------------------------------------------------------
 
+
 def test_boundary_connector_is_private():
     """The connector is stored as _connector — not part of the public API."""
-    b = DataFenceBoundary.__new__(DataFenceBoundary)
+    DataFenceBoundary.__new__(DataFenceBoundary)
     # Public attribute access to 'connector' should not exist
-    assert not hasattr(DataFenceBoundary, 'connector'), \
+    assert not hasattr(DataFenceBoundary, "connector"), (
         "connector must be _connector (private), not exposed publicly"
+    )
 
 
 def test_no_direct_sql_path_on_boundary(boundary):
@@ -398,11 +414,13 @@ def test_no_direct_sql_path_on_boundary(boundary):
 # Invariant 15 — Signing key never exposed through public API
 # ---------------------------------------------------------------------------
 
+
 def test_signing_key_not_in_public_api():
     """DataFenceBoundary does not expose signing_key as a public attribute."""
     # _signing_key is accessible (for tests) but 'signing_key' should not be
-    assert not hasattr(DataFenceBoundary, 'signing_key'), \
+    assert not hasattr(DataFenceBoundary, "signing_key"), (
         "signing_key must not be a public class attribute"
+    )
 
 
 def test_boundary_create_does_not_return_signing_key(db_path):
@@ -417,4 +435,4 @@ def test_boundary_create_does_not_return_signing_key(db_path):
     # The return value is a boundary object, not a tuple/dict with the key
     assert isinstance(b, DataFenceBoundary)
     # _signing_key exists internally but is not in __dict__ as a public attr
-    assert "_signing_key" in b.__dict__   # private is fine
+    assert "_signing_key" in b.__dict__  # private is fine

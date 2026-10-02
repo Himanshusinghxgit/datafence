@@ -19,11 +19,15 @@ DataFence transforms the untrusted request into a signed capability.
 The connector verifies the signature before execution.
 """
 
-from typing import Any, Protocol, Union
-from secrets import token_bytes
+from collections.abc import Callable
 from datetime import datetime, timedelta
+from secrets import token_bytes
+from typing import Any, Protocol
 from uuid import uuid4
 
+from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
+from datafence.core.policy import PolicyDecision as EnginePolicyDecision
+from datafence.core.registry import ResourceRegistry
 from datafence.core.types import (
     Actor,
     AllowedRequest,
@@ -34,13 +38,9 @@ from datafence.core.types import (
     ExecutionPlan,
     ExecutionResult,
     Intent,
-    Operation,
     PolicyDecision,
     Request,
 )
-from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
-from datafence.core.policy import PolicyDecision as EnginePolicyDecision
-from datafence.core.registry import ResourceRegistry
 
 
 class PolicyEngine(Protocol):
@@ -76,13 +76,13 @@ class PolicyEngine(Protocol):
 class Connector(Protocol):
     """
     Connector interface (v0.4 - Hardened).
-    
+
     CRITICAL CHANGES:
     - Connector accepts AuthorizedExecution (signed capability)
     - Connector receives signing_key at construction (NEVER through execute)
     - Connector verifies HMAC signature before execution
     - Connector is PRIVATE (not exported in public API)
-    
+
     The connector generates SQL from the capability internally.
     This ensures the database executes DataFence's authorized operation,
     not the LLM's untrusted request.
@@ -91,20 +91,20 @@ class Connector(Protocol):
     def execute(self, capability: AuthorizedExecution) -> list[dict[str, str]]:
         """
         Execute a signed capability.
-        
+
         The connector MUST:
         1. Verify capability signature (uses signing_key from __init__)
         2. Reject invalid/forged capabilities
         3. Generate SQL from the capability internally
         4. Use prepared statements
         5. Return ONLY the fields in capability.selected_fields
-        
+
         Args:
             capability: Signed AuthorizedExecution
-        
+
         Returns:
             Query results
-        
+
         Raises:
             CapabilityVerificationError: If signature is invalid
         """
@@ -114,7 +114,7 @@ class Connector(Protocol):
 class ResultValidator:
     """
     Validates execution results.
-    
+
     Even if the connector is compromised or buggy,
     this layer ensures returned data matches the ExecutionPlan.
     """
@@ -126,7 +126,7 @@ class ResultValidator:
     ) -> ExecutionResult:
         """
         Validate that returned data matches the ExecutionPlan.
-        
+
         Security checks:
         1. No unauthorized fields in results
         2. Row count within limit
@@ -140,9 +140,7 @@ class ResultValidator:
             returned_fields = set(row.keys())
             unauthorized = returned_fields - allowed_fields
             if unauthorized:
-                errors.append(
-                    f"Result contains unauthorized fields: {unauthorized}"
-                )
+                errors.append(f"Result contains unauthorized fields: {unauthorized}")
                 break
             missing = allowed_fields - returned_fields
             if missing:
@@ -151,9 +149,7 @@ class ResultValidator:
 
         # Check: Row count within limit
         if len(data) > plan.limit:
-            errors.append(
-                f"Result exceeds limit: {len(data)} rows > {plan.limit}"
-            )
+            errors.append(f"Result exceeds limit: {len(data)} rows > {plan.limit}")
 
         if errors:
             return ExecutionResult.create_failed(plan, errors)
@@ -164,15 +160,15 @@ class ResultValidator:
 class DataFenceBoundary:
     """
     The DataFence security boundary (v0.4 - Hardened).
-    
+
     This is the enforcement layer between AI agents and data.
-    
+
     SECURITY IMPROVEMENTS (v0.4):
     1. Connector is PRIVATE (_connector, not exposed)
     2. Capabilities are cryptographically signed (HMAC-SHA256)
     3. Signing key is generated securely and kept private
     4. Defense in depth: API design + cryptography
-    
+
     Security properties:
     1. Untrusted requests never reach the database directly
     2. Policy evaluation happens BEFORE execution
@@ -181,7 +177,7 @@ class DataFenceBoundary:
     5. Result validation happens AFTER execution
     6. Everything produces evidence
     7. Fail closed on errors
-    
+
     THREAT MODEL:
     - ✅ Protects against Threat Model A (untrusted LLM/agent)
     - ✅ Protects against Threat Model B (compromised application code)
@@ -192,22 +188,22 @@ class DataFenceBoundary:
         self,
         policy_engine: PolicyEngine,
         connector: Connector,
-        signing_key: bytes = None,
+        signing_key: bytes | None = None,
         registry: ResourceRegistry | None = None,
         capability_ttl_seconds: int = 300,
         capability_audience: str = "datafence",
     ):
         """
         Initialize DataFence boundary.
-        
+
         Args:
             policy_engine: Policy evaluation engine
             connector: Data connector (must support signature verification)
             signing_key: Optional signing key (32 bytes). If not provided, generates new key.
-        
+
         DEPRECATED: Direct construction is deprecated in v0.4.
         Use DataFenceBoundary.create() factory method instead.
-        
+
         SECURITY:
         - In v0.4, the boundary and connector MUST share the same signing key
         - Use create() factory to ensure proper key sharing
@@ -229,55 +225,56 @@ class DataFenceBoundary:
         self._capability_ttl_seconds = capability_ttl_seconds
         self._capability_audience = capability_audience
         self.validator = ResultValidator()
-        
+
         # Set or generate signing key
         if signing_key is not None:
             self._signing_key = signing_key
-        elif not hasattr(self, '_signing_key'):
+        elif not hasattr(self, "_signing_key"):
             # Fallback: generate key (for backward compatibility)
             # WARNING: This will cause key mismatch with connector!
             import warnings
+
             warnings.warn(
                 "Direct construction of DataFenceBoundary is deprecated. "
                 "Use DataFenceBoundary.create() factory method to ensure "
                 "proper key sharing with connector.",
                 DeprecationWarning,
-                stacklevel=2
+                stacklevel=2,
             )
             self._signing_key = token_bytes(32)
-    
+
     @classmethod
     def create(
         cls,
         policy_engine: PolicyEngine,
-        connector_factory: callable,
+        connector_factory: Callable[..., Connector],
         registry: ResourceRegistry | None = None,
         capability_ttl_seconds: int = 300,
         capability_audience: str = "datafence",
-        **connector_kwargs
+        **connector_kwargs: Any,
     ) -> "DataFenceBoundary":
         """
         Create DataFenceBoundary with properly configured connector.
-        
+
         This is THE REQUIRED way to create a boundary in v0.4.
-        
+
         Args:
             policy_engine: Policy evaluation engine
             connector_factory: Connector factory function or class
             **connector_kwargs: Arguments for connector (e.g., database_path)
-        
+
         Returns:
             Configured DataFenceBoundary
-        
+
         Example:
             from datafence.connectors.sqlite_connector import create_demo_database
-            
+
             boundary = DataFenceBoundary.create(
                 policy_engine=policy_engine,
                 connector_factory=create_demo_database,
                 database_path="/path/to/db.sqlite"
             )
-        
+
         SECURITY:
         - Generates signing key once
         - Passes key to connector factory at construction
@@ -297,11 +294,11 @@ class DataFenceBoundary:
 
         # Generate signing key (32 bytes for HMAC-SHA256)
         signing_key = token_bytes(32)
-        
+
         # Create connector with signing key
         # Pass signing_key as kwarg - factory MUST accept it
         connector = connector_factory(**connector_kwargs, signing_key=signing_key)
-        
+
         # Create boundary instance
         boundary = cls.__new__(cls)
         boundary.policy_engine = policy_engine
@@ -311,14 +308,14 @@ class DataFenceBoundary:
         boundary._capability_ttl_seconds = capability_ttl_seconds
         boundary._capability_audience = capability_audience
         boundary.validator = ResultValidator()
-        
+
         return boundary
 
     def execute(
         self,
         actor: Actor,
         intent: Intent,
-    ) -> Union[AllowedRequest, DeniedRequest]:
+    ) -> AllowedRequest | DeniedRequest:
         """
         Execute a request through the security boundary (v0.6).
 
@@ -400,7 +397,8 @@ class DataFenceBoundary:
     def _is_deny(raw_decision: Any) -> bool:
         """Return True if raw_decision is a denial."""
         from datafence.core.policy import PolicyEffect
-        return raw_decision.effect == PolicyEffect.DENY
+
+        return bool(raw_decision.effect == PolicyEffect.DENY)
 
     @staticmethod
     def _reasons(raw_decision: Any) -> list[str]:
@@ -486,7 +484,7 @@ class DataFenceBoundary:
     def _capability_to_plan(self, capability: AuthorizedExecution) -> ExecutionPlan:
         """
         Convert AuthorizedExecution to ExecutionPlan.
-        
+
         This is for backward compatibility with Evidence/Result types.
         ExecutionPlan is kept for audit trail but is not used for execution.
         """

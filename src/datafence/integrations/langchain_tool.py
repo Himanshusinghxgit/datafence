@@ -44,7 +44,7 @@ Note: LangChain is an optional dependency.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional, Type
+from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
 from datafence.core.types import Actor, AllowedRequest, Intent, Operation
@@ -65,7 +65,7 @@ class DataFenceLangChainTool:
         "Query data through the DataFence authorization boundary. "
         "Input must be a JSON string with 'resource' (required), and optionally "
         "'fields' (list), 'filters' (dict), and 'limit' (int). "
-        "Example: {\"resource\": \"transactions\", \"fields\": [\"merchant\", \"amount\"], \"limit\": 5}"
+        'Example: {"resource": "transactions", "fields": ["merchant", "amount"], "limit": 5}'
     )
 
     def __init__(
@@ -81,10 +81,11 @@ class DataFenceLangChainTool:
         # Try to inherit from LangChain BaseTool if available
         self._langchain_available = False
         try:
-            from langchain.tools import BaseTool as LCBaseTool  # type: ignore[import]
-            self._langchain_available = True
-        except ImportError:
-            pass
+            import importlib.util
+
+            self._langchain_available = importlib.util.find_spec("langchain.tools") is not None
+        except (ImportError, ValueError):
+            self._langchain_available = False
 
     def run(self, query: str) -> str:
         """LangChain tool interface: accepts a string, returns a string."""
@@ -117,16 +118,20 @@ class DataFenceLangChainTool:
         result = self.boundary.execute(self.principal, intent)
 
         if isinstance(result, AllowedRequest):
-            return json.dumps({
-                "status": "allowed",
-                "row_count": result.execution_result.row_count,
-                "data": result.execution_result.data,
-                "fields": result.execution_plan.selected_fields,
-            })
-        return json.dumps({
-            "status": "denied",
-            "reasons": list(result.decision.reasons),
-        })
+            return json.dumps(
+                {
+                    "status": "allowed",
+                    "row_count": result.execution_result.row_count,
+                    "data": result.execution_result.data,
+                    "fields": result.execution_plan.selected_fields,
+                }
+            )
+        return json.dumps(
+            {
+                "status": "denied",
+                "reasons": list(result.decision.reasons),
+            }
+        )
 
     async def _arun(self, query: str, **kwargs: Any) -> str:
         """Async interface (delegates to sync)."""

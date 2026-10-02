@@ -104,7 +104,7 @@ class DataFenceOpenAITool:
                         "filters": {
                             "type": "object",
                             "additionalProperties": {"type": "string"},
-                            "description": "Key=value row filters (e.g. {\"merchant\": \"Amazon\"}).",
+                            "description": 'Key=value row filters (e.g. {"merchant": "Amazon"}).',
                         },
                         "limit": {
                             "type": "integer",
@@ -149,16 +149,20 @@ class DataFenceOpenAITool:
         result = self.boundary.execute(principal, intent)
 
         if isinstance(result, AllowedRequest):
-            return json.dumps({
-                "status": "allowed",
-                "row_count": result.execution_result.row_count,
-                "data": result.execution_result.data,
-                "fields": result.execution_plan.selected_fields,
-                "evidence_id": result.evidence.execution_id,
-            })
+            return json.dumps(
+                {
+                    "status": "allowed",
+                    "row_count": result.execution_result.row_count,
+                    "data": result.execution_result.data,
+                    "fields": result.execution_plan.selected_fields,
+                    "evidence_id": result.evidence.execution_id,
+                }
+            )
         else:
-            return json.dumps({
-                "status": "denied",
-                "reasons": list(result.decision.reasons),
-                "request_id": result.request_id,
-            })
+            return json.dumps(
+                {
+                    "status": "denied",
+                    "reasons": list(result.decision.reasons),
+                    "request_id": result.request_id,
+                }
+            )

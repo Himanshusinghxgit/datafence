@@ -81,8 +81,7 @@ class AthenaConnector:
         """Execute a signed capability against AWS Athena."""
         if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
-                f"Invalid capability signature for execution "
-                f"{capability.execution_id!r}."
+                f"Invalid capability signature for execution {capability.execution_id!r}."
             )
         if capability.is_expired():
             raise CapabilityVerificationError(
@@ -99,7 +98,7 @@ class AthenaConnector:
 
         authorised = set(capability.selected_fields)
         return [
-            {col: val for col, val in zip(columns, row) if col in authorised}
+            {col: val for col, val in zip(columns, row, strict=False) if col in authorised}
             for row in rows
         ]
 
@@ -148,7 +147,7 @@ class AthenaConnector:
         if self._conn:
             self._conn.close()
 
-    def __enter__(self) -> "AthenaConnector":
+    def __enter__(self) -> AthenaConnector:
         return self
 
     def __exit__(self, *_: Any) -> None:

@@ -60,7 +60,7 @@ class SnowflakeConnector:
         **kwargs: Any,
     ) -> None:
         try:
-            import snowflake.connector
+            import snowflake.connector as snowflake_connector
         except ImportError as exc:
             raise ImportError(
                 "snowflake-connector-python is required for Snowflake support. "
@@ -85,7 +85,8 @@ class SnowflakeConnector:
         if role:
             connect_params["role"] = role
 
-        self._conn = snowflake.connector.connect(**connect_params)
+        self._dict_cursor = snowflake_connector.DictCursor
+        self._conn = snowflake_connector.connect(**connect_params)
 
     # ------------------------------------------------------------------
     # Public interface
@@ -95,8 +96,7 @@ class SnowflakeConnector:
         """Execute a signed capability against Snowflake."""
         if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
-                f"Invalid capability signature for execution "
-                f"{capability.execution_id!r}."
+                f"Invalid capability signature for execution {capability.execution_id!r}."
             )
         if capability.is_expired():
             raise CapabilityVerificationError(
@@ -105,7 +105,7 @@ class SnowflakeConnector:
 
         sql, params = self._compile(capability)
 
-        cursor = self._conn.cursor(snowflake.connector.DictCursor)
+        cursor = self._conn.cursor(self._dict_cursor)
         cursor.execute(sql, params)
         rows = cursor.fetchall()
 
@@ -132,8 +132,7 @@ class SnowflakeConnector:
         """
         resource = validate_identifier(capability.resource, "resource name")
         fields_sql = ", ".join(
-            f'"{validate_identifier(f, "field name")}"'
-            for f in capability.selected_fields
+            f'"{validate_identifier(f, "field name")}"' for f in capability.selected_fields
         )
 
         # Qualify with database.schema if available
@@ -169,7 +168,7 @@ class SnowflakeConnector:
         if self._conn:
             self._conn.close()
 
-    def __enter__(self) -> "SnowflakeConnector":
+    def __enter__(self) -> SnowflakeConnector:
         return self
 
     def __exit__(self, *_: Any) -> None:

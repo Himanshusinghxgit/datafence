@@ -5,9 +5,6 @@ These tests verify that one tenant cannot access another tenant's data.
 """
 
 import pytest
-
-from datafence import DataFence
-from datafence.audit.logger import MemoryAuditLogger
 from datafence.connectors.memory import MemoryConnector
 from datafence.core.decision import DecisionStatus
 from datafence.policy.models import (
@@ -16,6 +13,9 @@ from datafence.policy.models import (
     Policy,
     ResourcePolicy,
 )
+
+from datafence import DataFence
+from datafence.audit.logger import MemoryAuditLogger
 
 
 @pytest.fixture

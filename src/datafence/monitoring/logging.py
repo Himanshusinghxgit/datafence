@@ -4,8 +4,8 @@ Structured logging for DataFence.
 JSON logging with contextual information for production observability.
 """
 
-import logging
 import json
+import logging
 import sys
 from datetime import datetime
 from typing import Any
@@ -91,9 +91,7 @@ def setup_logging(
     if format == "json":
         formatter = JsonFormatter()
     else:
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-        )
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
@@ -147,7 +145,6 @@ class LoggingMiddleware:
         )
 
         start = time.perf_counter()
-        error = None
 
         try:
             result = self.fence.execute(request_dict)
@@ -172,7 +169,6 @@ class LoggingMiddleware:
             return result
 
         except Exception as e:
-            error = e
             duration_ms = (time.perf_counter() - start) * 1000
 
             self.logger.error(

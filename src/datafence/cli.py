@@ -7,7 +7,6 @@ Command-line interface for policy validation, testing, and management.
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 try:
     import click
@@ -16,10 +15,7 @@ except ImportError:
     click = None
     yaml = None
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector, SQLiteConnector
-from datafence.core.request import ExecutionRequest
-from datafence.errors import DataFenceError
+from datafence.core.policy import YAMLPolicyLoader
 
 
 def _ensure_dependencies():
@@ -54,31 +50,27 @@ def validate(policy_file: str, verbose: bool):
         click.echo(f"Validating policy: {policy_file}")
 
         # Load and validate policy
-        with open(policy_file, "r") as f:
+        with open(policy_file) as f:
             policy_dict = yaml.safe_load(f)
 
-        # Try to parse with DataFence
-        from datafence.policy.models import Policy
-
-        policy = Policy.model_validate(policy_dict["policy"])
+        # Parse with the canonical v1 policy loader.  Policy files are
+        # intentionally validated without constructing a boundary; boundary
+        # construction is where a concrete ResourceRegistry is required.
+        policy = YAMLPolicyLoader.from_dict(policy_dict)
 
         click.secho("✓ Policy is valid", fg="green")
 
         if verbose:
             click.echo("\nPolicy Summary:")
             click.echo(f"  Name: {policy.name}")
-            click.echo(f"  Version: {policy_dict.get('version', '1')}")
+            click.echo(f"  Version: {policy.version}")
             click.echo(f"  Resources: {len(policy.resources)}")
 
             for resource_name, resource_config in policy.resources.items():
                 click.echo(f"\n  Resource: {resource_name}")
-                click.echo(f"    Operations: {resource_config.operations}")
-                click.echo(
-                    f"    Fields: {len(resource_config.fields.get('allow', []))} allowed"
-                )
-
-                if hasattr(resource_config, "limits") and resource_config.limits:
-                    click.echo(f"    Limits: {resource_config.limits}")
+                click.echo(f"    Operations: {resource_config.actions}")
+                click.echo(f"    Fields: {len(resource_config.allowed_fields)} allowed")
+                click.echo(f"    Max rows: {resource_config.max_rows}")
 
     except yaml.YAMLError as e:
         click.secho(f"✗ YAML error: {e}", fg="red")
@@ -104,7 +96,7 @@ def describe(policy_file: str, resource: str, format: str):
     """
     try:
         # Load policy
-        with open(policy_file, "r") as f:
+        with open(policy_file) as f:
             policy_dict = yaml.safe_load(f)
 
         from datafence.policy.models import Policy
@@ -181,107 +173,10 @@ def test(
     dry_run: bool,
     verbose: bool,
 ):
-    """
-    Test a request against a policy.
-
-    Request file should be JSON with actor, operation, resource, etc.
-
-    Example:
-        datafence test policy.yaml request.json
-        datafence test policy.yaml request.json --dry-run
-        datafence test policy.yaml request.json -c sqlite -d data.db
-    """
-    try:
-        # Load request
-        with open(request_file, "r") as f:
-            request_dict = json.load(f)
-
-        # Create connector
-        if connector == "memory":
-            conn = MemoryConnector(data={})
-        elif connector == "sqlite":
-            if not database:
-                click.secho("✗ --database required for sqlite connector", fg="red")
-                sys.exit(1)
-            conn = SQLiteConnector(database)
-        else:
-            click.secho(f"✗ Unknown connector: {connector}", fg="red")
-            sys.exit(1)
-
-        # Load DataFence
-        fence = DataFence.from_yaml(policy_file, conn)
-
-        if dry_run:
-            # Just validate and show decision (don't execute)
-            click.echo("Dry-run mode: Checking policy compliance...\n")
-
-            # Manually evaluate policy
-            from datafence.core.context import ExecutionContext
-            from datafence.policy.evaluator import PolicyEvaluator
-
-            req = ExecutionRequest.model_validate(request_dict)
-            ctx = ExecutionContext(
-                request=req,
-                policy=fence.policy,
-                connector=conn,
-                sql_firewall=None,
-                pii_scanner=None,
-            )
-
-            evaluator = PolicyEvaluator(fence.policy)
-            decision = evaluator.evaluate(ctx)
-
-            click.echo(f"Decision: {decision.decision.value}")
-
-            if decision.decision.value == "allow":
-                click.secho("✓ Request would be ALLOWED", fg="green")
-            else:
-                click.secho("✗ Request would be DENIED", fg="red")
-
-            if decision.reasons:
-                click.echo("\nReasons:")
-                for reason in decision.reasons:
-                    click.echo(f"  - {reason}")
-
-            if verbose:
-                click.echo("\nApplied Policies:")
-                for policy in decision.applied_policies:
-                    click.echo(f"  - {policy}")
-
-        else:
-            # Full execution
-            result = fence.execute(request_dict)
-
-            if result.verified:
-                click.secho("✓ Request ALLOWED", fg="green")
-                click.echo(f"\nRows returned: {len(result.data)}")
-
-                if verbose and result.data:
-                    click.echo("\nSample data (first 3 rows):")
-                    for i, row in enumerate(result.data[:3], 1):
-                        click.echo(f"  Row {i}: {row}")
-
-                if verbose:
-                    click.echo("\nEvidence:")
-                    click.echo(f"  Hash: {result.evidence.evidence_hash}")
-                    click.echo(f"  Timestamp: {result.evidence.timestamp}")
-
-            else:
-                click.secho("✗ Request DENIED", fg="red")
-                click.echo("\nReasons:")
-                for reason in result.decision.reasons:
-                    click.echo(f"  - {reason}")
-
-    except DataFenceError as e:
-        click.secho(f"✗ DataFence error: {e}", fg="red")
-        sys.exit(1)
-    except Exception as e:
-        click.secho(f"✗ Error: {e}", fg="red")
-        if verbose:
-            import traceback
-
-            traceback.print_exc()
-        sys.exit(1)
+    """Report that the pre-v1 request runner is no longer supported."""
+    raise click.ClickException(
+        "The legacy request runner was removed in v1.0; use the typed boundary API."
+    )
 
 
 @cli.command()
@@ -289,52 +184,10 @@ def test(
 @click.option("--framework", "-f", type=click.Choice(["openai", "claude"]), required=True)
 @click.option("--output", "-o", type=click.Path(), help="Output file (default: stdout)")
 def export(policy_file: str, framework: str, output: str | None):
-    """
-    Export policy as framework-specific schemas.
-
-    Generates OpenAI function schemas or Claude tool schemas from policy.
-
-    Example:
-        datafence export policy.yaml --framework openai
-        datafence export policy.yaml -f claude -o tools.json
-    """
-    try:
-        # Create temporary connector
-        conn = MemoryConnector(data={})
-        fence = DataFence.from_yaml(policy_file, conn)
-
-        if framework == "openai":
-            from datafence.integrations.openai_adapter import OpenAIAdapter
-
-            adapter = OpenAIAdapter(fence)
-            schemas = adapter.get_functions()
-
-        elif framework == "claude":
-            from datafence.integrations.anthropic_adapter import ClaudeAdapter
-
-            adapter = ClaudeAdapter(fence)
-            schemas = adapter.get_tools()
-
-        else:
-            click.secho(f"✗ Unknown framework: {framework}", fg="red")
-            sys.exit(1)
-
-        output_json = json.dumps(schemas, indent=2)
-
-        if output:
-            with open(output, "w") as f:
-                f.write(output_json)
-            click.secho(f"✓ Exported to {output}", fg="green")
-        else:
-            click.echo(output_json)
-
-    except ImportError as e:
-        click.secho(f"✗ Missing dependency: {e}", fg="red")
-        click.echo("Install with: pip install 'datafence[integrations]'")
-        sys.exit(1)
-    except Exception as e:
-        click.secho(f"✗ Error: {e}", fg="red")
-        sys.exit(1)
+    """Report that the pre-v1 schema exporter is no longer supported."""
+    raise click.ClickException(
+        "The legacy schema exporter was removed in v1.0; use an integration adapter."
+    )
 
 
 @cli.command()
@@ -358,7 +211,7 @@ policy:
       operations:
         allow: [read]
         deny: [insert, update, delete]
-      
+
       fields:
         allow:
           - id
@@ -368,10 +221,10 @@ policy:
         deny:
           - password_hash
           - ssn
-      
+
       row_filters:
         tenant_id: "{{ actor.tenant_id }}"
-      
+
       limits:
         max_rows: 100
         max_date_range_days: 30

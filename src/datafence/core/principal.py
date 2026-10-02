@@ -81,7 +81,7 @@ class Principal:
     # ------------------------------------------------------------------
 
     @classmethod
-    def from_actor(cls, actor: Any) -> "Principal":
+    def from_actor(cls, actor: Any) -> Principal:
         """
         Construct a Principal from a legacy Actor dataclass.
 
