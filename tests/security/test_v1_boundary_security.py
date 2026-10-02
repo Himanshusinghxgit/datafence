@@ -7,7 +7,14 @@ import tempfile
 
 import pytest
 
-from datafence import Actor, DataFenceBoundary, Decision, Intent, Operation, create_banking_policy
+from datafence import (
+    Actor,
+    DataFenceBoundary,
+    Decision,
+    Intent,
+    Operation,
+    create_banking_policy,
+)
 from datafence.connectors.sqlite_connector import SQLiteConnector, create_demo_database
 
 
@@ -58,3 +65,13 @@ def test_destructive_operation_is_denied(boundary: DataFenceBoundary) -> None:
 
     assert result.evidence.decision == Decision.DENY
     assert "denied" in result.evidence.denial_reasons[0].lower()
+
+
+def test_registry_definitions_are_deeply_immutable(boundary: DataFenceBoundary) -> None:
+    resource = boundary._registry.get("transactions")
+    assert resource is not None
+
+    with pytest.raises(TypeError):
+        resource.fields["injected"] = resource.fields["id"]
+    with pytest.raises(AttributeError):
+        resource.tags.append("injected")

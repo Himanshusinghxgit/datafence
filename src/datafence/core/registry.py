@@ -31,8 +31,10 @@ RESTRICTED  — highly sensitive (card numbers, SSNs, credentials)
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 from datafence.core.resources import validate_identifier
@@ -56,7 +58,7 @@ class DataClassification(Enum):
         return _rank[self] > _rank[other]
 
 
-@dataclass
+@dataclass(frozen=True)
 class FieldDefinition:
     """
     Definition of a single field in a resource.
@@ -79,7 +81,7 @@ class FieldDefinition:
     description: str = ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class ResourceDefinition:
     """
     Definition of a data resource (table, view, collection).
@@ -93,12 +95,15 @@ class ResourceDefinition:
     """
 
     name: str
-    fields: dict[str, FieldDefinition] = field(default_factory=dict)
+    fields: Mapping[str, FieldDefinition] = field(default_factory=dict)
     description: str = ""
-    tags: list[str] = field(default_factory=list)
+    tags: Sequence[str] = ()
     supported_operations: tuple[str, ...] = ("read", "insert", "update", "delete")
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
+        object.__setattr__(self, "tags", tuple(self.tags))
+        object.__setattr__(self, "supported_operations", tuple(self.supported_operations))
         validate_identifier(self.name, context="resource name")
         for field_name in self.fields:
             validate_identifier(field_name, context="field name")
