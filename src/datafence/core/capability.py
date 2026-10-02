@@ -67,6 +67,7 @@ class AuthorizedExecution:
     # Policy provenance
     policy_version: str
     policy_decisions: list[str] = field(default_factory=list)
+    enforced_predicates: list[dict[str, Any]] = field(default_factory=list)
 
     # Capability lifecycle / audience binding
     expires_at: datetime | None = None
@@ -94,6 +95,7 @@ class AuthorizedExecution:
             self.operation.value,
             json.dumps(self.selected_fields, separators=(",", ":")),
             json.dumps(self.enforced_filters, sort_keys=True),
+            json.dumps(self.enforced_predicates, sort_keys=True, separators=(",", ":")),
             str(self.limit),
             self.policy_version,
             json.dumps(self.policy_decisions, separators=(",", ":")),
@@ -141,6 +143,15 @@ class AuthorizedExecution:
         """Return whether this capability is outside its validity window."""
         return self.expires_at is not None and (now or datetime.utcnow()) >= self.expires_at
 
+    def filter_constraints(self) -> list[dict[str, Any]]:
+        """Return lossless filter constraints, including legacy EQ filters."""
+        if self.enforced_predicates:
+            return list(self.enforced_predicates)
+        return [
+            {"field": field, "operator": "=", "value": value}
+            for field, value in self.enforced_filters.items()
+        ]
+
     @staticmethod
     def create_signed(
         execution_id: str,
@@ -156,6 +167,7 @@ class AuthorizedExecution:
         expires_at: datetime | None = None,
         audience: str = "datafence",
         nonce: str | None = None,
+        enforced_predicates: list[dict[str, Any]] | None = None,
     ) -> "AuthorizedExecution":
         """
         Create a signed capability.
@@ -191,6 +203,7 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
+            enforced_predicates=list(enforced_predicates or []),
             expires_at=expires_at or created_at + timedelta(minutes=5),
             audience=audience,
             nonce=nonce or uuid4().hex,
@@ -213,6 +226,7 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
+            enforced_predicates=list(enforced_predicates or []),
             expires_at=capability.expires_at,
             audience=capability.audience,
             nonce=capability.nonce,

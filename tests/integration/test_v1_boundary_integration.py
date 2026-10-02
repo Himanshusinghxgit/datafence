@@ -81,6 +81,60 @@ def test_connector_rejects_expired_signed_capability(boundary: DataFenceBoundary
         boundary._connector.execute(capability)
 
 
+def test_non_equality_predicate_is_preserved_in_capability(boundary: DataFenceBoundary) -> None:
+    capability = AuthorizedExecution.create_signed(
+        execution_id="integration-gt",
+        actor=Actor("integration-agent", "tenant_a"),
+        resource="transactions",
+        operation=Operation.READ,
+        selected_fields=["id", "amount"],
+        enforced_filters={},
+        enforced_predicates=[{"field": "amount", "operator": ">", "value": 100}],
+        limit=10,
+        policy_version="1.0",
+        policy_decisions=["transactions.rows.amount_gt"],
+        signing_key=boundary._signing_key,
+    )
+
+    sql, params = boundary._connector._compile(capability)
+    assert "amount >" in sql
+    assert params["filter_0"] == 100
+
+
+def test_restricted_filter_field_is_rejected(boundary: DataFenceBoundary) -> None:
+    result = boundary.execute(
+        Actor("integration-agent", "tenant_a"),
+        Intent(
+            "transactions",
+            Operation.READ,
+            ["id"],
+            filters={"card_number": "4111111111111111"},
+        ),
+    )
+
+    assert result.evidence.decision == Decision.DENY
+    assert "restricted field" in result.evidence.denial_reasons[0]
+
+
+def test_connector_enforces_capability_audience(boundary: DataFenceBoundary) -> None:
+    capability = AuthorizedExecution.create_signed(
+        execution_id="integration-audience",
+        actor=Actor("integration-agent", "tenant_a"),
+        resource="transactions",
+        operation=Operation.READ,
+        selected_fields=["id"],
+        enforced_filters={"tenant_id": "tenant_a"},
+        limit=1,
+        policy_version="1.0",
+        policy_decisions=["transactions.action.read"],
+        signing_key=boundary._signing_key,
+        audience="another-connector",
+    )
+
+    with pytest.raises(CapabilityVerificationError, match="audience"):
+        boundary._connector.execute(capability)
+
+
 def test_postgres_boundary_read() -> None:
     """Exercise the canonical PostgreSQL connector when CI provides PostgreSQL."""
     psycopg = pytest.importorskip("psycopg")

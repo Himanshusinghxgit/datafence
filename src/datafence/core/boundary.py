@@ -28,6 +28,7 @@ from uuid import uuid4
 from datafence.core.capability import AuthorizedExecution, CapabilityVerificationError
 from datafence.core.policy import PolicyDecision as EnginePolicyDecision
 from datafence.core.registry import ResourceRegistry
+from datafence.core.resources import Filter
 from datafence.core.types import (
     Actor,
     AllowedRequest,
@@ -297,7 +298,11 @@ class DataFenceBoundary:
 
         # Create connector with signing key
         # Pass signing_key as kwarg - factory MUST accept it
-        connector = connector_factory(**connector_kwargs, signing_key=signing_key)
+        connector = connector_factory(
+            **connector_kwargs,
+            signing_key=signing_key,
+            expected_audience=capability_audience,
+        )
 
         # Create boundary instance
         boundary = cls.__new__(cls)
@@ -454,13 +459,10 @@ class DataFenceBoundary:
         if not selected_fields:
             raise ValueError("No authorized fields available after policy evaluation")
 
-        # enforced_filter already has actor refs resolved by the policy engine
-        resolved_filters = raw_decision.enforced_filter.to_dict()
-
-        # SECURITY INVARIANT: Policy filters win — user can only narrow scope
-        for key, value in intent.filters.items():
-            if key not in resolved_filters:
-                resolved_filters[key] = value
+        # Keep the typed policy predicates intact. Policy predicates win on
+        # duplicate fields; user filters can only narrow the result.
+        resolved_filter = raw_decision.enforced_filter.merge(Filter.from_dict(intent.filters))
+        resolved_filters = resolved_filter.to_dict()  # compatibility/audit view
 
         limit = raw_decision.row_limit.value
         if intent.limit:
@@ -473,6 +475,7 @@ class DataFenceBoundary:
             operation=intent.operation,
             selected_fields=selected_fields,
             enforced_filters=resolved_filters,
+            enforced_predicates=resolved_filter.to_constraints(),
             limit=limit,
             policy_version=raw_decision.policy_version,
             policy_decisions=list(raw_decision.matched_rules),

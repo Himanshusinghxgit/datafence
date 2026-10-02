@@ -51,7 +51,9 @@ class SQLiteConnector:
     Application code should not instantiate it directly.
     """
 
-    def __init__(self, database_path: str, signing_key: bytes) -> None:
+    def __init__(
+        self, database_path: str, signing_key: bytes, expected_audience: str = "datafence"
+    ) -> None:
         """
         Initialise the connector.
 
@@ -61,6 +63,7 @@ class SQLiteConnector:
         """
         self.database_path = database_path
         self._signing_key = signing_key  # PRIVATE — never expose
+        self._expected_audience = expected_audience
         self.connection = sqlite3.connect(database_path)
         self.connection.row_factory = sqlite3.Row
 
@@ -88,6 +91,8 @@ class SQLiteConnector:
             raise CapabilityVerificationError(
                 f"Expired capability for execution {capability.execution_id!r}"
             )
+        if capability.audience != self._expected_audience:
+            raise CapabilityVerificationError("Capability audience does not match connector")
 
         # 2. Compile SQL from verified capability
         sql, params = self._compile(capability)
@@ -140,13 +145,30 @@ class SQLiteConnector:
 
         # WHERE clause — filter values always parameterised
         params: dict[str, Any] = {}
-        if capability.enforced_filters:
+        constraints = capability.filter_constraints()
+        if constraints:
             conditions: list[str] = []
-            for i, (col, val) in enumerate(capability.enforced_filters.items()):
+            for i, constraint in enumerate(constraints):
+                col = constraint["field"]
+                operator = constraint["operator"]
+                val = constraint.get("value")
                 safe_col = validate_identifier(col, context="filter column")
                 param_name = f"filter_{i}"
-                conditions.append(f"{safe_col} = :{param_name}")
-                params[param_name] = val
+                if operator in {"IS NULL", "IS NOT NULL"}:
+                    conditions.append(f"{safe_col} {operator}")
+                elif operator in {"IN", "NOT IN"}:
+                    values = list(val) if isinstance(val, (list, tuple, set)) else [val]
+                    names = []
+                    for index, item in enumerate(values):
+                        name = f"{param_name}_{index}"
+                        names.append(f":{name}")
+                        params[name] = item
+                    conditions.append(f"{safe_col} {operator} ({', '.join(names)})")
+                else:
+                    if operator not in {"=", "!=", "<", "<=", ">", ">="}:
+                        raise ValueError(f"Unsupported filter operator: {operator!r}")
+                    conditions.append(f"{safe_col} {operator} :{param_name}")
+                    params[param_name] = val
             sql += " WHERE " + " AND ".join(conditions)
 
         # LIMIT — integer, never a string, never from the LLM
@@ -201,7 +223,9 @@ class MaliciousConnector(SQLiteConnector):
 # ---------------------------------------------------------------------------
 
 
-def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnector:
+def create_demo_database(
+    database_path: str, signing_key: bytes, expected_audience: str = "datafence"
+) -> SQLiteConnector:
     """
     Create (or re-create) the demo database and return a connector.
 
@@ -315,4 +339,4 @@ def create_demo_database(database_path: str, signing_key: bytes) -> SQLiteConnec
     conn.commit()
     conn.close()
 
-    return SQLiteConnector(database_path, signing_key)
+    return SQLiteConnector(database_path, signing_key, expected_audience)

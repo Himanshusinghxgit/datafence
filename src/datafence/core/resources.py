@@ -181,12 +181,13 @@ class Predicate:
             return Predicate(self.field, self.operator, principal.tenant_id)
         if ref == ":actor_id":
             return Predicate(self.field, self.operator, principal.id)
-        # Try arbitrary attribute access: ":actor.department" → principal.attributes["department"]
+        # Resolve arbitrary actor metadata: ":actor.department".
         if ref.startswith(":actor."):
             attr_name = ref[len(":actor.") :]
             attr_val = getattr(principal, attr_name, None)
             if attr_val is None:
-                attr_val = principal.attributes.get(attr_name)
+                metadata = getattr(principal, "metadata", {})
+                attr_val = metadata.get(attr_name)
             if attr_val is None:
                 raise ValueError(
                     f"Cannot resolve actor reference {ref!r}: "
@@ -232,12 +233,23 @@ class Filter:
         return cls(predicates=preds)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert back to legacy {field: value} dict (EQ predicates only)."""
+        """Return an equality-only compatibility view of the filter."""
         result: dict[str, Any] = {}
         for pred in self.predicates:
             if pred.operator == PredicateOperator.EQ:
                 result[pred.field.name] = pred.value
         return result
+
+    def to_constraints(self) -> list[dict[str, Any]]:
+        """Return a lossless, deterministic representation of all predicates."""
+        return [
+            {
+                "field": pred.field.name,
+                "operator": pred.operator.value,
+                "value": pred.value,
+            }
+            for pred in self.predicates
+        ]
 
     def merge(self, other: Filter) -> Filter:
         """

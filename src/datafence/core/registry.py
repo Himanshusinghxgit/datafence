@@ -234,6 +234,11 @@ class ResourceRegistry:
         self.validate_fields(intent.resource, fields)
         for field_name in intent.filters:
             validate_identifier(field_name, context="filter field name")
+            field = resource.fields.get(field_name)
+            if field is None:
+                raise ValueError(f"Unknown filter field on {intent.resource!r}: {field_name!r}")
+            if field.classification == DataClassification.RESTRICTED:
+                raise ValueError(f"Filtering on restricted field is not allowed: {field_name!r}")
         if intent.limit is not None and intent.limit <= 0:
             raise ValueError("Intent limit must be positive")
 

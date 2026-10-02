@@ -54,6 +54,7 @@ class AthenaConnector:
         s3_staging_dir: str,
         region_name: str,
         schema_name: str = "default",
+        expected_audience: str = "datafence",
         **kwargs: Any,
     ) -> None:
         try:
@@ -65,6 +66,7 @@ class AthenaConnector:
             ) from exc
 
         self._signing_key = signing_key
+        self._expected_audience = expected_audience
         self._schema_name = schema_name
         self._conn = pyathena.connect(
             s3_staging_dir=s3_staging_dir,
@@ -87,6 +89,8 @@ class AthenaConnector:
             raise CapabilityVerificationError(
                 f"Expired capability for execution {capability.execution_id!r}"
             )
+        if capability.audience != self._expected_audience:
+            raise CapabilityVerificationError("Capability audience does not match connector")
 
         sql, params = self._compile(capability)
 
@@ -128,12 +132,26 @@ class AthenaConnector:
         sql = f'SELECT {fields_sql} FROM "{db}"."{resource}"'
         params: list[Any] = []
 
-        if capability.enforced_filters:
+        constraints = capability.filter_constraints()
+        if constraints:
             conditions: list[str] = []
-            for col, val in capability.enforced_filters.items():
+            for constraint in constraints:
+                col = constraint["field"]
+                operator = constraint["operator"]
+                val = constraint.get("value")
                 safe_col = validate_identifier(col, "filter column")
-                conditions.append(f"{safe_col} = ?")
-                params.append(val)
+                if operator in {"IS NULL", "IS NOT NULL"}:
+                    conditions.append(f"{safe_col} {operator}")
+                elif operator in {"IN", "NOT IN"}:
+                    values = list(val) if isinstance(val, (list, tuple, set)) else [val]
+                    placeholders = ", ".join("?" for _ in values)
+                    conditions.append(f"{safe_col} {operator} ({placeholders})")
+                    params.extend(values)
+                else:
+                    if operator not in {"=", "!=", "<", "<=", ">", ">="}:
+                        raise ValueError(f"Unsupported filter operator: {operator!r}")
+                    conditions.append(f"{safe_col} {operator} ?")
+                    params.append(val)
             sql += " WHERE " + " AND ".join(conditions)
 
         sql += f" LIMIT {int(capability.limit)}"

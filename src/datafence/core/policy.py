@@ -531,7 +531,12 @@ class YAMLPolicyLoader:
         row_rules: list[RowRule] = []
         for rule in data.get("rows") or []:
             op_str = rule.get("operator", "equals").lower()
-            op = _OP_MAP.get(op_str, PredicateOperator.EQ)
+            try:
+                op = _OP_MAP[op_str]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Unknown row-filter operator {op_str!r} for resource {name!r}"
+                ) from exc
             row_rules.append(
                 RowRule(
                     field=rule["field"],
