@@ -313,9 +313,11 @@ class DataFencePolicyEngine(PolicyEngine):
         )
     """
 
-    def __init__(self, policy: DataFencePolicy, registry: Any = None) -> None:
+    def __init__(self, policy: DataFencePolicy, registry: Any) -> None:
+        if registry is None:
+            raise ValueError("DataFencePolicyEngine requires a ResourceRegistry")
         self._policy = policy
-        self._registry = registry  # Registry is supplied by the boundary.
+        self._registry = registry
 
     @property
     def policy_name(self) -> str:
@@ -358,23 +360,22 @@ class DataFencePolicyEngine(PolicyEngine):
                 policy_version=self._policy.version,
             )
 
-        # 0. Registry validation (if registry provided)
-        if self._registry is not None:
-            if not self._registry.exists(resource):
+        # 0. Registry validation is mandatory and precedes authorization.
+        if not self._registry.exists(resource):
+            return PolicyDecision.deny(
+                reasons=[f"Resource {resource!r} is not registered"],
+                policy_name=self._policy.name,
+                policy_version=self._policy.version,
+            )
+        if requested_fields:
+            try:
+                self._registry.validate_fields(resource, requested_fields)
+            except ValueError as exc:
                 return PolicyDecision.deny(
-                    reasons=[f"Resource {resource!r} is not registered"],
+                    reasons=[str(exc)],
                     policy_name=self._policy.name,
                     policy_version=self._policy.version,
                 )
-            if requested_fields:
-                try:
-                    self._registry.validate_fields(resource, requested_fields)
-                except ValueError as exc:
-                    return PolicyDecision.deny(
-                        reasons=[str(exc)],
-                        policy_name=self._policy.name,
-                        policy_version=self._policy.version,
-                    )
 
         # 1. Action check
         action_decision = rp.action_decision(action)
@@ -561,83 +562,3 @@ class YAMLPolicyLoader:
             max_rows=max_rows,
             obligations=obligations,
         )
-
-
-def create_banking_policy() -> DataFencePolicyEngine:
-    """
-    Create the banking demo policy using the Phase-3 model.
-
-    This is the v2 replacement for create_banking_demo_policy() in policy_engine.py.
-
-    The banking registry is mandatory for the returned policy engine.
-    """
-    from datafence.core.policy import (
-        ActionDecision,
-        DataFencePolicy,
-        DataFencePolicyEngine,
-        ResourcePolicy,
-        RowRule,
-    )
-    from datafence.core.resources import PredicateOperator
-
-    policy = DataFencePolicy(
-        name="banking-demo-v1",
-        version="1.0",
-        resources={
-            "transactions": ResourcePolicy(
-                resource="transactions",
-                actions={
-                    "read": ActionDecision.ALLOW,
-                    "insert": ActionDecision.DENY,
-                    "update": ActionDecision.DENY,
-                    "delete": ActionDecision.DENY,
-                },
-                allowed_fields=["id", "merchant", "amount", "timestamp"],
-                denied_fields=["card_number", "account_number"],
-                row_rules=[
-                    RowRule(
-                        field="tenant_id",
-                        operator=PredicateOperator.EQ,
-                        value=":actor_tenant_id",
-                    )
-                ],
-                max_rows=100,
-                obligations={"audit": True},
-            ),
-            "customers": ResourcePolicy(
-                resource="customers",
-                actions={
-                    "read": ActionDecision.ALLOW,
-                    "insert": ActionDecision.DENY,
-                    "update": ActionDecision.DENY,
-                    "delete": ActionDecision.DENY,
-                },
-                allowed_fields=["id", "name", "email"],
-                denied_fields=["ssn", "account_number"],
-                row_rules=[
-                    RowRule(
-                        field="tenant_id",
-                        operator=PredicateOperator.EQ,
-                        value=":actor_tenant_id",
-                    )
-                ],
-                max_rows=100,
-            ),
-            "accounts": ResourcePolicy(
-                resource="accounts",
-                actions={
-                    "read": ActionDecision.DENY,
-                    "insert": ActionDecision.DENY,
-                    "update": ActionDecision.DENY,
-                    "delete": ActionDecision.DENY,
-                },
-                allowed_fields=[],
-                denied_fields=["account_number", "balance"],
-                max_rows=0,
-            ),
-        },
-    )
-    from datafence.core.registry import create_banking_registry
-
-    registry = create_banking_registry()
-    return DataFencePolicyEngine(policy, registry=registry)

@@ -1,7 +1,10 @@
 """
-Snowflake connector for DataFence (Phase 5).
+Snowflake reference connector for DataFence.
 
-Replaces the legacy snowflake.py which used the old ExecutionRequest interface.
+THIS IS A REFERENCE IMPLEMENTATION — not a DataFence core component.
+For production use, integrate AuthorizedExecution with your existing
+data-access layer.  See ``datafence/connectors/protocol.py`` for the
+minimal DataConnector contract.
 
 SECURITY:
     - Accepts ONLY signed AuthorizedExecution capabilities

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datafence"
 version = "1.0.0"
-description = "A deterministic authorization and execution boundary for AI agents accessing data"
+description = "Deterministic authorization boundary for AI agents accessing enterprise data"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

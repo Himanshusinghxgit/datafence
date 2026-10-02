@@ -1,30 +1,30 @@
 """
-DataFence MCP Tool (Phase 6).
+DataFence MCP Tool.
 
-Exposes a DataFenceBoundary as an MCP tool so AI agents can query
-data through a properly authorized execution boundary.
+Exposes a DataFenceBoundary as an MCP tool so AI agents can request
+data access through a properly authorized execution boundary.
 
 Architecture::
 
     AI Agent
-        │  MCP tool call: {"resource": "transactions", "fields": [...], ...}
+        │  MCP tool call: {"resource": "orders", "fields": [...], ...}
         ▼
-    DataFenceQueryTool.call()
-        │  constructs Intent
+    DataFenceQueryTool.call(principal, params)
+        │  constructs Intent from agent params (untrusted)
         ▼
-    DataFenceBoundary.execute(principal, intent)
-        │  policy → signed capability → connector → validation
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution
         ▼
-    ToolResult (rows | denial reason)
-
-The tool NEVER passes raw SQL to the boundary.  It converts the tool
-call parameters into a typed Intent.
+    ToolResult  — returns the signed capability to the caller
+                  (the caller's connector executes it, not DataFence)
 
 Security invariants:
-    - The Principal is provided by the MCP server (not the agent).
-    - The agent controls: resource, fields, filters (untrusted — Intent).
-    - The policy controls: authorised fields, enforced row filters, limits.
+    - The Principal is provided by the MCP server from authenticated context,
+      never from the agent's tool call arguments.
+    - The agent controls: resource, fields, filters (all treated as untrusted Intent).
+    - The policy controls: authorized fields, enforced row filters, row limits.
     - The agent cannot escalate beyond what the policy allows.
+    - DataFence does not execute database operations; it only authorizes.
 """
 
 from __future__ import annotations
@@ -33,7 +33,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, AllowedRequest, Intent, Operation
+from datafence.core.types import Actor, Intent, Operation
+from datafence.errors import DataFenceError
 
 
 @dataclass
@@ -41,8 +42,7 @@ class ToolResult:
     """Result returned to the MCP client / agent."""
 
     allowed: bool
-    data: list[dict[str, Any]]
-    row_count: int
+    capability: dict[str, Any] | None
     denial_reasons: list[str]
     request_id: str
     evidence_id: str
@@ -50,8 +50,7 @@ class ToolResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "allowed": self.allowed,
-            "data": self.data,
-            "row_count": self.row_count,
+            "capability": self.capability,
             "denial_reasons": self.denial_reasons,
             "request_id": self.request_id,
             "evidence_id": self.evidence_id,
@@ -172,24 +171,30 @@ class DataFenceQueryTool:
             limit=int(params.get("limit") or 10),
         )
 
-        # Execute through boundary
-        result = self.boundary.execute(principal, intent)
-
-        if isinstance(result, AllowedRequest):
-            return ToolResult(
-                allowed=True,
-                data=result.execution_result.data,
-                row_count=result.execution_result.row_count,
-                denial_reasons=[],
-                request_id=result.request_id,
-                evidence_id=result.evidence.execution_id,
-            )
-        else:
+        try:
+            capability = self.boundary.authorize(principal, intent)
+        except DataFenceError as exc:
             return ToolResult(
                 allowed=False,
-                data=[],
-                row_count=0,
-                denial_reasons=list(result.decision.reasons),
-                request_id=result.request_id,
-                evidence_id=result.evidence.execution_id,
+                capability=None,
+                denial_reasons=[str(exc)],
+                request_id="",
+                evidence_id="",
             )
+        return ToolResult(
+            allowed=True,
+            capability={
+                "execution_id": capability.execution_id,
+                "resource": capability.resource,
+                "operation": capability.operation.value,
+                "selected_fields": capability.selected_fields,
+                "enforced_predicates": capability.filter_constraints(),
+                "limit": capability.limit,
+                "policy_version": capability.policy_version,
+                "expires_at": capability.expires_at.isoformat() if capability.expires_at else None,
+                "audience": capability.audience,
+            },
+            denial_reasons=[],
+            request_id=capability.execution_id,
+            evidence_id=capability.execution_id,
+        )

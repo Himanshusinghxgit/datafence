@@ -1,27 +1,82 @@
-version: "1"
+name: basic-example
+version: "1.0"
 
-policy:
-  name: basic-example
-  
-  resources:
-    users:
-      operations:
-        allow:
-          - read
-        deny:
-          - insert
-          - update
-          - delete
-      
-      fields:
-        allow:
-          - user_id
-          - username
-          - email
-          - created_at
-        deny:
-          - password_hash
-          - api_key
-      
-      limits:
-        max_rows: 100
+# Generic domain-neutral policy for the basic DataFence example.
+# Uses neutral resources: users, documents, orders.
+#
+# Schema reference: datafence.core.policy.YAMLPolicyLoader
+#   resources.<name>.actions.<operation>: allow | deny
+#   resources.<name>.fields.allow: [field, ...]
+#   resources.<name>.fields.deny:  [field, ...]
+#   resources.<name>.rows:         [{field, operator, value}, ...]
+#   resources.<name>.limits.rows:  <int>
+
+resources:
+  users:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow:
+        - id
+        - tenant_id
+        - username
+        - email
+        - created_at
+      deny:
+        - password_hash
+        - api_key
+    rows:
+      - field: tenant_id
+        operator: eq
+        value: ":actor_tenant_id"
+    limits:
+      rows: 100
+
+  documents:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow:
+        - id
+        - tenant_id
+        - title
+        - status
+        - created_at
+      deny:
+        - internal_notes
+    rows:
+      - field: tenant_id
+        operator: eq
+        value: ":actor_tenant_id"
+    limits:
+      rows: 50
+
+  orders:
+    actions:
+      read: allow
+      insert: deny
+      update: deny
+      delete: deny
+    fields:
+      allow:
+        - id
+        - tenant_id
+        - customer_id
+        - total
+        - status
+        - created_at
+      deny: []
+    rows:
+      - field: tenant_id
+        operator: eq
+        value: ":actor_tenant_id"
+    limits:
+      rows: 200
+    obligations:
+      audit: true

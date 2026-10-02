@@ -16,7 +16,8 @@ except ImportError:  # pragma: no cover
     Field = None
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, AllowedRequest, Intent, Operation
+from datafence.core.types import Actor, Intent, Operation
+from datafence.errors import DataFenceError
 
 
 class ExecuteRequest(BaseModel):
@@ -27,15 +28,15 @@ class ExecuteRequest(BaseModel):
     limit: int | None = None
 
 
-class ExecuteResponse(BaseModel):
-    success: bool
-    verified: bool
-    data: list[dict[str, Any]] | None = None
-    row_count: int | None = None
-    decision: str
+class AuthorizeResponse(BaseModel):
+    authorized: bool
+    execution_id: str | None = None
+    resource: str | None = None
+    operation: str | None = None
+    fields: list[str] | None = None
+    predicates: list[dict[str, Any]] | None = None
+    limit: int | None = None
     reasons: list[str] | None = None
-    evidence_hash: str | None = None
-    timestamp: str | None = None
 
 
 class DescribeRequest(BaseModel):
@@ -86,13 +87,13 @@ def create_api(
     async def health() -> HealthResponse:
         return HealthResponse(status="healthy", version=version)
 
-    @app.post("/execute", response_model=ExecuteResponse)
-    async def execute(
+    @app.post("/authorize", response_model=AuthorizeResponse)
+    async def authorize(
         request: ExecuteRequest,
         actor: Actor = Depends(principal),  # noqa: B008
-    ) -> ExecuteResponse:  # noqa: B008
+    ) -> AuthorizeResponse:  # noqa: B008
         try:
-            result = boundary.execute(
+            capability = boundary.authorize(
                 actor,
                 Intent(
                     resource=request.resource,
@@ -102,27 +103,18 @@ def create_api(
                     limit=request.limit,
                 ),
             )
-        except ValueError as exc:
+        except DataFenceError as exc:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request"
+                status_code=status.HTTP_403_FORBIDDEN, detail="Authorization denied"
             ) from exc
-        if isinstance(result, AllowedRequest):
-            return ExecuteResponse(
-                success=True,
-                verified=True,
-                data=result.execution_result.data,
-                row_count=result.execution_result.row_count,
-                decision="allow",
-                evidence_hash=result.evidence.evidence_hash,
-                timestamp=result.evidence.timestamp.isoformat(),
-            )
-        return ExecuteResponse(
-            success=False,
-            verified=False,
-            decision="deny",
-            reasons=result.decision.reasons,
-            evidence_hash=result.evidence.evidence_hash,
-            timestamp=result.evidence.timestamp.isoformat(),
+        return AuthorizeResponse(
+            authorized=True,
+            execution_id=capability.execution_id,
+            resource=capability.resource,
+            operation=capability.operation.value,
+            fields=capability.selected_fields,
+            predicates=capability.filter_constraints(),
+            limit=capability.limit,
         )
 
     @app.post("/describe")

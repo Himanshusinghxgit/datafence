@@ -1,7 +1,12 @@
 """
-SQLite connector for DataFence (v1.0 - typed IR, safe identifier compilation).
+SQLite reference connector for DataFence (v1.0).
 
-CRITICAL SECURITY PROPERTIES:
+THIS IS A REFERENCE IMPLEMENTATION — not a DataFence core component.
+For production use, integrate AuthorizedExecution with your existing
+database/API layer.  See ``datafence/connectors/protocol.py`` for the
+minimal DataConnector contract.
+
+SECURITY PROPERTIES (enforced by this connector):
     - Connector verifies cryptographic signature before execution
     - Connector accepts ONLY signed AuthorizedExecution capabilities
     - Identifiers (table/column names) are validated against a strict

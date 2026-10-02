@@ -1,43 +1,82 @@
 """
-DataFence — Policy-Enforced Data Execution for AI.
+DataFence — Deterministic authorization boundary for AI agents accessing enterprise data.
 
-The core principle: The model proposes. DataFence decides.
+Core principle: **The model proposes. DataFence decides. The customer's backend executes.**
 
-Version 1.0.0 — Capability-gated authorization and execution boundary
-------------------------------------------
-All legacy v0.1–v0.4 code has been moved to datafence._legacy/.
-The public API exposes only the v1.0 capability-based architecture.
+Security invariant
+------------------
+An untrusted AI agent must never be able to cause an enterprise data connector to
+execute an operation that DataFence has not explicitly authorized.
 
-Single execution path:
-    Intent (untrusted)
-        ↓  Resource Registry validates identifiers
-        ↓  Policy Engine evaluates + injects row filters
-        ↓  AuthorizedExecution (HMAC-signed capability)
-        ↓  Connector (verifies signature, compiles safe SQL)
-        ↓  Result Validator
-        → AllowedRequest + Evidence
+Canonical flow::
 
-There is no alternate path. No ExecutionRequest. No raw SQL from agents.
+    Principal (from application auth layer)
+        +
+    Intent (from AI agent — untrusted)
+        |
+        v
+    DataFenceBoundary.authorize()
+        |
+        ├─ ResourceRegistry.validate_intent()
+        ├─ DataFencePolicyEngine.evaluate()
+        └─ AuthorizedExecution (HMAC-signed)
+                |
+                v
+        customer_connector.execute(authorized)   ← customer-owned
+                |
+                v
+        Enterprise data
 
 Quick start::
 
-    from datafence import DataFenceBoundary, Actor, Intent, Operation
-    from datafence import create_banking_policy
-    from datafence.connectors.sqlite_connector import create_demo_database
-
-    policy_engine = create_banking_policy()
-    boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
-        connector_factory=create_demo_database,
-        registry=policy_engine.registry,
-        database_path="data.db",
+    from secrets import token_bytes
+    from datafence import (
+        Actor, DataFenceBoundary, Intent, Operation,
+        DataFencePolicyEngine, DataFencePolicy, ResourcePolicy, ActionDecision,
+        ResourceRegistry, ResourceDefinition, FieldDefinition,
+        CapabilityVerifier,
     )
 
-    result = boundary.execute(
-        Actor(id="agent:finance", tenant_id="acme"),
-        Intent(resource="transactions", operation=Operation.READ,
-               fields=["id", "merchant", "amount"]),
+    # 1. Build the registry (WHAT exists and its schema contract)
+    registry = ResourceRegistry()
+    registry.register(ResourceDefinition("orders", fields={
+        "id":        FieldDefinition("id", "integer"),
+        "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        "total":     FieldDefinition("total", "decimal"),
+        "status":    FieldDefinition("status", "string"),
+    }))
+
+    # 2. Define the policy (WHO can do WHAT)
+    from datafence.core.resources import PredicateOperator
+    from datafence.core.policy import RowRule
+    policy = DataFencePolicy("orders-v1", "1.0", {
+        "orders": ResourcePolicy(
+            "orders",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "total", "status"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=100,
+        )
+    })
+    engine = DataFencePolicyEngine(policy, registry=registry)
+
+    # 3. Create the boundary
+    key = token_bytes(32)   # keep this secret
+    fence = DataFenceBoundary.create(engine, registry, key)
+
+    # 4. Authorize (DataFence decides)
+    authorized = fence.authorize(
+        Actor("user:alice", "tenant-acme"),
+        Intent("orders", Operation.READ, fields=["id", "total", "status"]),
     )
+
+    # 5. Pass to customer-owned connector (customer executes)
+    CapabilityVerifier(key).verify(authorized)
+    result = my_connector.execute(authorized)   # your code, your database
+
+DataFence does NOT own the connector, the database, credentials, or
+execution.  See ``examples/basic/`` for a fully runnable neutral example
+and ``docs/architecture.md`` for the security model.
 """
 
 # ---------------------------------------------------------------------------
@@ -46,14 +85,16 @@ Quick start::
 from datafence.core.boundary import DataFenceBoundary
 
 # ---------------------------------------------------------------------------
-# Capability error (for exception handling)
-# Note: AuthorizedExecution itself is NOT exported — it is internal to
-# DataFenceBoundary. Application code should never construct capabilities.
+# Capability contract and customer-side verifier
 # ---------------------------------------------------------------------------
-from datafence.core.capability import CapabilityVerificationError
+from datafence.core.capability import (
+    AuthorizedExecution,
+    CapabilityVerificationError,
+    CapabilityVerifier,
+)
 
 # ---------------------------------------------------------------------------
-# Policy engine (v1.0)
+# Policy engine (v1)
 # ---------------------------------------------------------------------------
 from datafence.core.policy import (
     ActionDecision,
@@ -64,8 +105,12 @@ from datafence.core.policy import (
     ResourcePolicy,
     RowRule,
     YAMLPolicyLoader,
-    create_banking_policy,
 )
+
+# ---------------------------------------------------------------------------
+# Principal (richer alias for Actor with roles + attributes)
+# ---------------------------------------------------------------------------
+from datafence.core.principal import Principal
 
 # ---------------------------------------------------------------------------
 # Resource Registry
@@ -75,7 +120,6 @@ from datafence.core.registry import (
     FieldDefinition,
     ResourceDefinition,
     ResourceRegistry,
-    create_banking_registry,
 )
 
 # ---------------------------------------------------------------------------
@@ -92,17 +136,11 @@ from datafence.core.resources import (
 )
 
 # ---------------------------------------------------------------------------
-# Types
+# Core types
 # ---------------------------------------------------------------------------
 from datafence.core.types import (
     Actor,
-    AllowedRequest,
-    AuditEvent,
     Decision,
-    DeniedRequest,
-    Evidence,
-    ExecutionPlan,
-    ExecutionResult,
     Intent,
     Operation,
     Request,
@@ -124,22 +162,20 @@ from datafence.errors import (
 __version__ = "1.0.0"
 
 __all__ = [
-    # ── Core ─────────────────────────────────────────────────────────────
+    # ── Core boundary ────────────────────────────────────────────────────
     "DataFenceBoundary",
-    # ── Types ─────────────────────────────────────────────────────────────
+    # ── Capability ───────────────────────────────────────────────────────
+    "AuthorizedExecution",
+    "CapabilityVerifier",
+    "CapabilityVerificationError",
+    # ── Types ────────────────────────────────────────────────────────────
     "Actor",
+    "Principal",
     "Intent",
     "Request",
     "Operation",
     "Decision",
-    "PolicyDecision",
-    "ExecutionPlan",  # audit / evidence only — not executable
-    "ExecutionResult",
-    "AllowedRequest",
-    "DeniedRequest",
-    "Evidence",
-    "AuditEvent",
-    # ── Typed IR ──────────────────────────────────────────────────────────
+    # ── Typed IR ─────────────────────────────────────────────────────────
     "ResourceRef",
     "FieldRef",
     "Predicate",
@@ -147,23 +183,21 @@ __all__ = [
     "Filter",
     "Projection",
     "RowLimit",
-    # ── Policy ────────────────────────────────────────────────────────────
+    # ── Policy ───────────────────────────────────────────────────────────
+    "PolicyDecision",
+    "PolicyEffect",
     "DataFencePolicyEngine",
     "DataFencePolicy",
     "ResourcePolicy",
     "RowRule",
     "ActionDecision",
-    "PolicyEffect",
     "YAMLPolicyLoader",
-    "create_banking_policy",
-    # ── Registry ──────────────────────────────────────────────────────────
+    # ── Registry ─────────────────────────────────────────────────────────
     "ResourceRegistry",
     "ResourceDefinition",
     "FieldDefinition",
     "DataClassification",
-    "create_banking_registry",
-    # ── Errors ────────────────────────────────────────────────────────────
-    "CapabilityVerificationError",
+    # ── Errors ───────────────────────────────────────────────────────────
     "DataFenceError",
     "PolicyError",
     "PolicyDeniedError",

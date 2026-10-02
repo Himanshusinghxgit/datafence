@@ -55,7 +55,8 @@ import json
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, AllowedRequest, Intent, Operation
+from datafence.core.types import Actor, Intent, Operation
+from datafence.errors import DataFenceError
 
 
 class DataFenceOpenAITool:
@@ -146,23 +147,24 @@ class DataFenceOpenAITool:
             limit=int(args.get("limit") or 10),
         )
 
-        result = self.boundary.execute(principal, intent)
-
-        if isinstance(result, AllowedRequest):
-            return json.dumps(
-                {
-                    "status": "allowed",
-                    "row_count": result.execution_result.row_count,
-                    "data": result.execution_result.data,
-                    "fields": result.execution_plan.selected_fields,
-                    "evidence_id": result.evidence.execution_id,
-                }
-            )
-        else:
+        try:
+            capability = self.boundary.authorize(principal, intent)
+        except DataFenceError as exc:
             return json.dumps(
                 {
                     "status": "denied",
-                    "reasons": list(result.decision.reasons),
-                    "request_id": result.request_id,
+                    "reasons": [str(exc)],
                 }
             )
+        return json.dumps(
+            {
+                "status": "authorized",
+                "execution_id": capability.execution_id,
+                "resource": capability.resource,
+                "operation": capability.operation.value,
+                "fields": capability.selected_fields,
+                "predicates": capability.filter_constraints(),
+                "limit": capability.limit,
+                "expires_at": capability.expires_at.isoformat() if capability.expires_at else None,
+            }
+        )

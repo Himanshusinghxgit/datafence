@@ -5,29 +5,70 @@ All notable changes to DataFence will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - 2026-09-27
+## [1.0.0] - 2026-10-02
 
-### Contract-Frozen Security Boundary
+### Architecture Migration — Generic Authorization Boundary
 
-DataFence 1.0.0 freezes the deterministic authorization boundary as a
-security-boundary prototype. It is not a production-readiness or compliance
-claim; external security review and operational hardening remain required.
+This release completes the migration from a banking-specific database execution
+framework to a generic, domain-independent authorization boundary.
 
-### Added - Core Features (Phase 1)
+**Core architectural change**: DataFence no longer executes database operations.
+The boundary owns authorization and capability issuance. The customer's backend
+connector owns execution.
 
-**Policy Engine**
-- Deterministic policy evaluation engine
-- YAML-based policy configuration
-- Column-level access control
-- Row-level filtering with tenant isolation
-- Operation restrictions (read, insert, update, delete)
-- Resource-level permissions
-- Actor-based authorization
+#### Ownership model (canonical)
 
-**Provenance & Evidence**
-- Cryptographic evidence generation
-- Complete audit trail
-- Data lineage tracking
+```
+Principal + Intent → DataFenceBoundary.authorize() → AuthorizedExecution
+                                                            ↓
+                                              Customer connector.execute()
+```
+
+#### Breaking changes from v0.x
+
+- `DataFenceBoundary.execute()` removed — use `.authorize()` then pass
+  `AuthorizedExecution` to your connector.
+- `DataFence` legacy class removed from public API (still in `_legacy/`).
+- `ExecutionPlan`, `ExecutionResult`, `Evidence`, `AllowedRequest`,
+  `DeniedRequest` removed from `core/types.py` — these were v0.3 artifacts
+  that implied the boundary executed database operations.
+- Banking-specific symbols (`BankPolicy`, `create_bank_registry`, etc.) were
+  never part of the v1 public API; they exist only under `examples/bank/`.
+
+#### Added
+
+- `DataConnector` protocol (`connectors/protocol.py`) — minimal interface
+  for customer connectors.
+- `ConnectorResult` dataclass — standard result from a connector.
+- `InMemoryReferenceConnector` — in-memory connector for tests and examples.
+- `examples/bank/` — banking domain example (application-level, not core).
+- `examples/basic/` — primary generic quickstart (orders, documents, customers).
+- `SECURITY.md` — security model, trust boundaries, known limitations.
+- `docs/threat-model.md` — structured threat model (A–F).
+- `tests/test_security_invariants.py` — comprehensive security invariant tests
+  covering authorization, capability integrity, predicate losslessness, registry
+  validation, identity model, and connector end-to-end.
+- Length-prefixed HMAC canonicalization to prevent separator-collision attacks.
+- `timezone.utc`-aware datetimes throughout (removes `utcnow()` deprecation warnings).
+- `DataFenceBoundary` uses typed instance attributes (fixes mypy attr-defined errors).
+
+#### Fixed
+
+- ARCHITECTURE.md now reflects the v1 architecture (was still describing v0.3).
+- `policies/basic.yaml` now uses the correct v1 schema.
+- `examples/basic/application.py` now uses correct package-level imports.
+- MCP server/tool docstrings no longer reference `boundary.execute()` or
+  `create_banking_policy()`.
+- DB connector docstrings labeled as reference implementations, not core.
+
+---
+
+## [Historical — v0.1 to v0.4]
+
+See `_legacy/` for the archived v0.x implementation. These versions used
+`DataFence.execute()` which bundled authorization and database execution in
+the same call. That architecture is deprecated and preserved only for reference.
+
 - Policy decision provenance
 
 **Connectors**

@@ -1,37 +1,56 @@
 """
 DataFence Authorized Execution Capability.
 
-This module implements the cryptographic capability model for v0.4.
+SECURITY MODEL
+--------------
+AuthorizedExecution is the *only* output of DataFenceBoundary.authorize().
 
-SECURITY MODEL:
-- AuthorizedExecution is created ONLY by DataFenceBoundary
-- Each capability has an HMAC signature over its contents
-- Connector verifies signature before execution
-- Signature uses secret key shared between boundary and connector
+Properties:
+- Created ONLY by DataFenceBoundary via AuthorizedExecution._create_signed().
+- Each capability carries an HMAC-SHA256 signature covering ALL fields.
+- Connector verifies signature before translating the capability to a DB call.
+- Capability is immutable (frozen dataclass) — cannot be altered after issuance.
 
-This prevents:
-- Capability forgery (attacker cannot create valid HMAC)
-- Capability tampering (signature covers all fields)
-- Bypass attacks (connector requires valid signature)
+What this prevents:
+- Capability forgery (attacker cannot create a valid HMAC without the key).
+- Capability tampering (any field change invalidates the signature).
+- Bypass attacks (connector must call verify() before execution).
+- Audience confusion (capability is bound to a specific audience tag).
+- Replay within the TTL window (nonce provides uniqueness per issuance).
 
-THREAT MODEL:
-- ✅ Protects against Threat Model A (untrusted LLM/agent)
-- ✅ Protects against Threat Model B (compromised application code)
-- ❌ Does NOT protect against Threat Model C (full Python runtime compromise)
+What this does NOT prevent:
+- Full Python runtime compromise (Threat Model C) — the signing key can be
+  extracted via Python introspection. This is explicitly out of scope.
+- Replay attacks after the TTL window if the connector does not store nonces.
+  Replay protection requires the connector to record consumed nonces.
+  This is documented as a limitation; nonces provide uniqueness, not replay
+  prevention on their own.
 
-The secret key can be extracted via Python introspection (Threat Model C),
-but this is explicitly out of scope.
+Canonicalization note
+---------------------
+Fields are joined with "|" after JSON-serializing structured values.
+Actor-controlled strings (actor.id, tenant_id, resource) could in principle
+contain "|" characters, creating ambiguity.  To prevent this, every
+variable-length field is length-prefixed: "<len>:<value>" before joining.
+This ensures the canonical representation is unambiguous regardless of
+field content.
 """
 
 import hashlib
 import hmac
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
 from datafence.core.types import Actor, Operation
+
+
+def _lp(s: str) -> str:
+    """Length-prefix a string: '5:hello'."""
+    encoded = s.encode("utf-8")
+    return f"{len(encoded)}:{s}"
 
 
 @dataclass(frozen=True)
@@ -39,15 +58,11 @@ class AuthorizedExecution:
     """
     Cryptographically signed execution capability.
 
-    This represents DataFence's authorization for ONE specific operation.
+    Represents DataFence's authorization for ONE specific operation.
+    Created exclusively by DataFenceBoundary; verified by the customer connector.
 
-    The capability:
-    - Is created ONLY by DataFenceBoundary
-    - Contains an HMAC signature over all fields
-    - Cannot be forged without the secret signing key
-    - Cannot be tampered with (signature verification fails)
-
-    INTERNAL USE ONLY - Not exported in public API.
+    The customer connector MUST call CapabilityVerifier.verify() before
+    translating this capability into any backend operation.
     """
 
     # Execution metadata
@@ -59,15 +74,17 @@ class AuthorizedExecution:
     resource: str
     operation: Operation
 
-    # Authorized access
+    # Authorized access (what the connector may execute)
     selected_fields: list[str]
-    enforced_filters: dict[str, Any]
+    enforced_filters: dict[str, Any]   # legacy EQ-only view; use enforced_predicates
     limit: int
 
-    # Policy provenance
-    policy_version: str
-    policy_decisions: list[str] = field(default_factory=list)
+    # Typed, lossless predicate list (full operator + value preserved)
     enforced_predicates: list[dict[str, Any]] = field(default_factory=list)
+
+    # Policy provenance
+    policy_version: str = "unknown"
+    policy_decisions: list[str] = field(default_factory=list)
 
     # Capability lifecycle / audience binding
     expires_at: datetime | None = None
@@ -77,83 +94,99 @@ class AuthorizedExecution:
     # Cryptographic signature (HMAC-SHA256)
     signature: bytes = field(default=b"", repr=False)
 
+    # ------------------------------------------------------------------
+    # Canonical representation
+    # ------------------------------------------------------------------
+
     def _compute_canonical_repr(self) -> bytes:
         """
-        Compute canonical byte representation for HMAC.
+        Produce a deterministic, unambiguous byte representation for HMAC.
 
-        This must be deterministic and cover ALL security-relevant fields.
-        Any tampering will change the signature.
+        Every security-relevant field is covered.
+        Variable-length string fields are length-prefixed to prevent
+        canonicalization collisions caused by attacker-controlled values
+        that happen to contain the separator character.
         """
-        # Build canonical representation
         parts = [
-            self.execution_id,
-            self.created_at.isoformat(),
-            self.actor.id,
-            self.actor.tenant_id,
-            json.dumps(self.actor.metadata, sort_keys=True),
-            self.resource,
-            self.operation.value,
-            json.dumps(self.selected_fields, separators=(",", ":")),
-            json.dumps(self.enforced_filters, sort_keys=True),
-            json.dumps(self.enforced_predicates, sort_keys=True, separators=(",", ":")),
-            str(self.limit),
-            self.policy_version,
-            json.dumps(self.policy_decisions, separators=(",", ":")),
-            self.expires_at.isoformat() if self.expires_at else "",
-            self.audience,
-            self.nonce,
+            _lp(self.execution_id),
+            _lp(self.created_at.isoformat()),
+            _lp(self.actor.id),
+            _lp(self.actor.tenant_id),
+            _lp(json.dumps(self.actor.metadata, sort_keys=True, separators=(",", ":"))),
+            _lp(self.resource),
+            _lp(self.operation.value),
+            _lp(json.dumps(sorted(self.selected_fields), separators=(",", ":"))),
+            _lp(json.dumps(self.enforced_filters, sort_keys=True, separators=(",", ":"))),
+            _lp(
+                json.dumps(
+                    sorted(self.enforced_predicates, key=lambda p: json.dumps(p, sort_keys=True)),
+                    separators=(",", ":"),
+                )
+            ),
+            _lp(str(self.limit)),
+            _lp(self.policy_version),
+            _lp(json.dumps(self.policy_decisions, separators=(",", ":"))),
+            _lp(self.expires_at.isoformat() if self.expires_at else ""),
+            _lp(self.audience),
+            _lp(self.nonce),
         ]
-
         canonical = "|".join(parts)
         return canonical.encode("utf-8")
 
+    # ------------------------------------------------------------------
+    # Signature operations
+    # ------------------------------------------------------------------
+
     def compute_signature(self, signing_key: bytes) -> bytes:
-        """
-        Compute HMAC-SHA256 signature over capability contents.
-
-        Args:
-            signing_key: Secret key (32 bytes recommended)
-
-        Returns:
-            HMAC signature (32 bytes)
-        """
-        canonical = self._compute_canonical_repr()
-        return hmac.new(signing_key, canonical, hashlib.sha256).digest()
+        """Compute HMAC-SHA256 over the canonical representation."""
+        return hmac.new(signing_key, self._compute_canonical_repr(), hashlib.sha256).digest()
 
     def verify_signature(self, signing_key: bytes) -> bool:
         """
-        Verify capability signature.
+        Verify the capability signature using constant-time comparison.
 
-        Args:
-            signing_key: Secret key used to sign
-
-        Returns:
-            True if signature is valid, False otherwise
-
-        Security:
-            Uses constant-time comparison to prevent timing attacks
+        Returns False (not raises) so callers can produce a controlled error.
         """
         if not self.signature:
             return False
+        expected = self.compute_signature(signing_key)
+        return hmac.compare_digest(self.signature, expected)
 
-        expected_signature = self.compute_signature(signing_key)
-        return hmac.compare_digest(self.signature, expected_signature)
+    # ------------------------------------------------------------------
+    # Lifecycle helpers
+    # ------------------------------------------------------------------
 
     def is_expired(self, now: datetime | None = None) -> bool:
-        """Return whether this capability is outside its validity window."""
-        return self.expires_at is not None and (now or datetime.utcnow()) >= self.expires_at
+        """Return True if the capability is past its expiry timestamp."""
+        if self.expires_at is None:
+            return False
+        reference = now or datetime.now(timezone.utc)
+        # Handle both tz-aware and tz-naive expires_at (legacy data)
+        if self.expires_at.tzinfo is None:
+            # Treat naive as UTC for comparison
+            reference = reference.replace(tzinfo=None) if reference.tzinfo else reference
+        return reference >= self.expires_at
 
     def filter_constraints(self) -> list[dict[str, Any]]:
-        """Return lossless filter constraints, including legacy EQ filters."""
+        """Return the lossless predicate list.
+
+        Includes full operator semantics — not just equality.
+        Connectors should compile from this, not from enforced_filters.
+        """
         if self.enforced_predicates:
             return list(self.enforced_predicates)
+        # Fallback: synthesize EQ predicates from the legacy dict view.
         return [
-            {"field": field, "operator": "=", "value": value}
-            for field, value in self.enforced_filters.items()
+            {"field": f, "operator": "=", "value": v}
+            for f, v in self.enforced_filters.items()
         ]
 
+    # ------------------------------------------------------------------
+    # Factory (called only by DataFenceBoundary)
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def create_signed(
+    def _create_signed(
         execution_id: str,
         actor: Actor,
         resource: str,
@@ -172,27 +205,15 @@ class AuthorizedExecution:
         """
         Create a signed capability.
 
-        This is the ONLY way to create a valid capability.
-        Called by DataFenceBoundary.
-
-        Args:
-            execution_id: Unique execution identifier
-            actor: Authorized actor
-            resource: Resource to access
-            operation: Operation to perform
-            selected_fields: Fields authorized for access
-            enforced_filters: Filters that must be applied
-            limit: Maximum rows
-            policy_version: Policy version used
-            policy_decisions: Policy decisions made
-            signing_key: Secret signing key
-
-        Returns:
-            Signed AuthorizedExecution capability
+        This is the ONLY legitimate construction path.
+        Called exclusively by DataFenceBoundary._build_capability().
         """
-        # Create unsigned capability
-        created_at = datetime.utcnow()
-        capability = AuthorizedExecution(
+        created_at = datetime.now(timezone.utc)
+        effective_expires = expires_at or created_at + timedelta(minutes=5)
+        effective_nonce = nonce or uuid4().hex
+
+        # Build unsigned first to compute the canonical representation.
+        unsigned = AuthorizedExecution(
             execution_id=execution_id,
             created_at=created_at,
             actor=actor,
@@ -204,20 +225,17 @@ class AuthorizedExecution:
             policy_version=policy_version,
             policy_decisions=policy_decisions,
             enforced_predicates=list(enforced_predicates or []),
-            expires_at=expires_at or created_at + timedelta(minutes=5),
+            expires_at=effective_expires,
             audience=audience,
-            nonce=nonce or uuid4().hex,
-            signature=b"",  # Temporary
+            nonce=effective_nonce,
+            signature=b"",
         )
+        sig = unsigned.compute_signature(signing_key)
 
-        # Compute signature
-        signature = capability.compute_signature(signing_key)
-
-        # Create signed capability
-        # Note: We need to bypass frozen=True here
-        signed_capability = AuthorizedExecution(
+        # Reconstruct with the real signature (frozen dataclass).
+        return AuthorizedExecution(
             execution_id=execution_id,
-            created_at=capability.created_at,
+            created_at=created_at,
             actor=actor,
             resource=resource,
             operation=operation,
@@ -227,16 +245,13 @@ class AuthorizedExecution:
             policy_version=policy_version,
             policy_decisions=policy_decisions,
             enforced_predicates=list(enforced_predicates or []),
-            expires_at=capability.expires_at,
-            audience=capability.audience,
-            nonce=capability.nonce,
-            signature=signature,
+            expires_at=effective_expires,
+            audience=audience,
+            nonce=effective_nonce,
+            signature=sig,
         )
 
-        return signed_capability
-
     def __post_init__(self) -> None:
-        """Validate capability fields."""
         if not self.execution_id:
             raise ValueError("execution_id cannot be empty")
         if not self.resource:
@@ -249,7 +264,69 @@ class AuthorizedExecution:
             raise ValueError("audience cannot be empty")
 
 
+# ---------------------------------------------------------------------------
+# Customer-side verifier
+# ---------------------------------------------------------------------------
+
+
 class CapabilityVerificationError(Exception):
-    """Raised when capability signature verification fails."""
+    """Raised when capability verification fails (forged, expired, or mis-targeted)."""
 
     pass
+
+
+class CapabilityVerifier:
+    """Customer-side verifier for DataFence authorization capabilities.
+
+    The customer backend configures this verifier with the same signing key
+    (or an asymmetric verification key in a PKI deployment) and calls
+    :meth:`verify` before translating a capability into a backend operation.
+
+    Usage::
+
+        verifier = CapabilityVerifier(signing_key, expected_audience="my-service")
+        verifier.verify(capability)        # raises on failure
+        result = my_connector.execute(capability)
+    """
+
+    def __init__(self, signing_key: bytes, expected_audience: str = "datafence") -> None:
+        if not signing_key:
+            raise ValueError("signing_key cannot be empty")
+        if not expected_audience:
+            raise ValueError("expected_audience cannot be empty")
+        self._signing_key = signing_key
+        self._expected_audience = expected_audience
+
+    def verify(self, capability: AuthorizedExecution) -> None:
+        """Verify a capability and raise CapabilityVerificationError on any failure.
+
+        Checks (in order):
+        1. Type — must be an AuthorizedExecution instance.
+        2. Audience — must match the configured expected_audience.
+        3. Expiry — must not be expired.
+        4. Signature — HMAC must be valid.
+
+        Args:
+            capability: The AuthorizedExecution returned by boundary.authorize().
+
+        Raises:
+            CapabilityVerificationError: On any verification failure.
+        """
+        if not isinstance(capability, AuthorizedExecution):
+            raise CapabilityVerificationError(
+                f"Expected AuthorizedExecution, got {type(capability).__name__!r}"
+            )
+        if capability.audience != self._expected_audience:
+            raise CapabilityVerificationError(
+                f"Capability audience {capability.audience!r} does not match "
+                f"expected {self._expected_audience!r}"
+            )
+        if capability.is_expired():
+            raise CapabilityVerificationError(
+                f"Capability {capability.execution_id!r} has expired"
+            )
+        if not capability.verify_signature(self._signing_key):
+            raise CapabilityVerificationError(
+                f"Capability {capability.execution_id!r} has an invalid signature — "
+                "it may be forged or tampered with"
+            )

@@ -1,5 +1,5 @@
 """
-DataFence MCP Server (Phase 6).
+DataFence MCP Server.
 
 Wraps DataFenceBoundary as a Model Context Protocol server that can be
 registered with any MCP-compatible agent framework.
@@ -7,54 +7,56 @@ registered with any MCP-compatible agent framework.
 Architecture::
 
     [AI Agent / Claude / GPT-4]
-            │  MCP JSON-RPC call
+            │  MCP JSON-RPC call (untrusted arguments)
             ▼
     DataFenceMCPServer
-            │  resolves principal from session context
+            │  resolves principal from authenticated session context
             │  calls DataFenceQueryTool.call(principal, params)
             ▼
-    DataFenceBoundary
-            │  policy → capability → connector → validation
+    DataFenceBoundary.authorize(principal, intent)
+            │  Registry validation → Policy evaluation → Capability issuance
             ▼
-    ToolResult → JSON response to agent
+    AuthorizedExecution (HMAC-signed) → returned to caller
+            │
+            ▼  (caller passes to their connector — DataFence does not execute)
+    Customer-owned connector
+            │
+            ▼
+    Enterprise data
 
 The MCP server is responsible for:
-    1. Authenticating the session (who is calling)
-    2. Mapping session identity → Principal
-    3. Routing tool calls to the correct DataFenceQueryTool
+    1. Authenticating the session (who is calling).
+    2. Mapping session identity → Principal (never from the agent's JSON).
+    3. Routing tool calls to the correct DataFenceQueryTool.
 
 DataFence is responsible for:
-    1. Authorizing what the principal may do
-    2. Generating signed capabilities
-    3. Enforcing row/field policy
-    4. Returning verified results + evidence
+    1. Authorizing what the principal may do.
+    2. Generating signed AuthorizedExecution capabilities.
+    3. Enforcing row/field policy.
 
-Usage (standalone HTTP-based MCP server)::
+DataFence does NOT execute database operations.
+
+Security note on principal resolution
+--------------------------------------
+The principal MUST be resolved from transport-level authentication context
+(e.g. a session token verified by the application), NOT from the agent's
+tool call arguments.  The agent must never be able to choose its own identity.
+
+Usage::
 
     from datafence.mcp.server import DataFenceMCPServer
     from datafence.core.boundary import DataFenceBoundary
-    from datafence.core.policy import create_banking_policy
-    from datafence.connectors.sqlite_connector import create_demo_database
 
-    policy_engine = create_banking_policy()
     boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
-        connector_factory=create_demo_database,
-        registry=policy_engine.registry,
-        database_path="/data/banking.db",
+        policy_engine=engine,
+        registry=registry,
+        signing_key=signing_key,
     )
-
     server = DataFenceMCPServer(
         boundary=boundary,
-        server_name="banking-datafence",
-        version="0.6.0",
+        server_name="my-datafence",
+        principal_resolver=my_auth_resolver,
     )
-
-    # With a MCP HTTP transport:
-    # server.run(host="0.0.0.0", port=8080)
-
-    # Or get the callable for embedding in another framework:
-    # handler = server.as_handler()
 """
 
 from __future__ import annotations

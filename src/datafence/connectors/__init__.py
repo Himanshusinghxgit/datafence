@@ -1,59 +1,27 @@
 """
-DataFence data connectors.
+DataFence connector interface and reference implementations.
 
-v0.6 connector architecture
-----------------------------
-All v0.5 connectors accept ONLY signed AuthorizedExecution capabilities.
-They verify the HMAC signature before execution and validate all SQL
-identifiers.  They never accept raw SQL or the legacy ExecutionRequest.
+IMPORTANT: DataFence does NOT own database connectors.
+---------------------------------------------------------
+DataFenceBoundary.authorize() returns an AuthorizedExecution capability.
+The *customer's* existing backend connector receives that capability,
+verifies its signature, and translates it into the appropriate database call.
 
-v0.6 (canonical-path) connectors
-----------------------------------
-  SQLiteConnector           — reference implementation, fully integrated
-  PostgreSQLConnector       — requires: pip install datafence[postgres]
-  AthenaConnector           — requires: pip install datafence[athena]
-  SnowflakeConnector        — requires: pip install datafence[snowflake]
+DataFence never constructs a connector, never holds database credentials,
+and never executes SQL.
 
-Legacy connectors (v0.1–v0.4, DEPRECATED)
-------------------------------------------
-  connectors.sqlite         — old interface, lacks capability signatures
-  connectors.postgres       — old interface, lacks capability signatures
-  connectors.athena         — old interface, lacks capability signatures
-  connectors.snowflake      — old interface, lacks capability signatures
+What this package provides
+---------------------------
+- ``DataConnector``          : Minimal Protocol that any connector should satisfy.
+- ``InMemoryReferenceConnector``: A simple in-memory connector for tests/examples only.
 
-These legacy connectors are NOT imported here.  They remain in the package
-only for direct import by code that explicitly depends on the old interface.
+Production connectors (PostgreSQL, Snowflake, Athena, …) are in
+``datafence/connectors/<name>_connector.py`` and are reference implementations
+demonstrating the contract — not DataFence core components.  Production
+applications should implement the connector in their own codebase using
+their existing data-access layer.
 """
 
-# v0.6 reference connector (always available — no extra deps)
-from datafence.connectors.sqlite_connector import (
-    MaliciousConnector,
-    SQLiteConnector,
-    create_demo_database,
-)
+from datafence.connectors.protocol import ConnectorResult, DataConnector
 
-# v0.6 optional connectors (gracefully absent if deps not installed)
-try:
-    from datafence.connectors.postgres_connector import PostgreSQLConnector
-except ImportError:
-    PostgreSQLConnector = None  # type: ignore[assignment,misc]
-
-try:
-    from datafence.connectors.athena_connector import AthenaConnector
-except ImportError:
-    AthenaConnector = None  # type: ignore[assignment,misc]
-
-try:
-    from datafence.connectors.snowflake_connector import SnowflakeConnector
-except ImportError:
-    SnowflakeConnector = None  # type: ignore[assignment,misc]
-
-__all__ = [
-    # v0.6
-    "SQLiteConnector",
-    "MaliciousConnector",
-    "create_demo_database",
-    "PostgreSQLConnector",
-    "AthenaConnector",
-    "SnowflakeConnector",
-]
+__all__ = ["DataConnector", "ConnectorResult"]

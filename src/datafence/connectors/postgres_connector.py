@@ -1,10 +1,12 @@
 """
-PostgreSQL connector for DataFence (Phase 4).
+PostgreSQL reference connector for DataFence.
 
-This is the first production-grade connector.  It replaces the legacy
-postgres.py which used the old ExecutionRequest interface.
+THIS IS A REFERENCE IMPLEMENTATION — not a DataFence core component.
+For production use, integrate AuthorizedExecution with your existing
+database/API layer.  See ``datafence/connectors/protocol.py`` for the
+minimal DataConnector contract.
 
-SECURITY:
+SECURITY PROPERTIES (enforced by this connector):
     - Accepts ONLY signed AuthorizedExecution capabilities
     - Verifies HMAC signature before any query is built
     - All identifiers validated (table + column names)
@@ -16,18 +18,13 @@ Requires:  psycopg[binary] >= 3.1  (install with: pip install datafence[postgres
 Usage::
 
     from datafence.connectors.postgres_connector import PostgreSQLConnector
-    from datafence.core.boundary import DataFenceBoundary
-    from datafence.core.policy import create_banking_policy
 
-    policy_engine = create_banking_policy()
-    boundary = DataFenceBoundary.create(
-        policy_engine=policy_engine,
-        connector_factory=PostgreSQLConnector,
-        registry=policy_engine.registry,
+    connector = PostgreSQLConnector(
+        signing_key=signing_key,
         conninfo="postgresql://user:pass@localhost/dbname",
+        expected_audience="my-service",
     )
-
-    result = boundary.execute(principal, intent)
+    result = connector.execute(authorized_execution)
 """
 
 from __future__ import annotations

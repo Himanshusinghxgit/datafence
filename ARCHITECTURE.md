@@ -1,410 +1,357 @@
 # DataFence Architecture
 
-**Status**: Prototype / Experimental (v0.3.0)
+**Version**: 1.0.0 — Capability-gated authorization boundary
 
 ## What DataFence Is
 
-DataFence is a **deterministic authorization and execution boundary** for AI agents accessing data.
+DataFence is a **deterministic authorization boundary** between an AI agent
+and enterprise data.
 
-The core principle:
+The central principle:
 
-> **The model proposes. DataFence decides.**
+> **The model proposes. DataFence decides. The customer's backend executes.**
 
-The database executes DataFence's authorized ExecutionPlan, not the LLM's untrusted request.
+The fundamental security invariant:
 
-## What DataFence Is NOT
+> An untrusted AI agent must never be able to cause an enterprise data
+> connector to execute an operation that DataFence has not explicitly authorized.
 
-- ❌ A complete enterprise security product (yet)
-- ❌ A replacement for IAM or database permissions
-- ❌ A guarantee against LLM hallucinations
-- ❌ A prompt injection detector
-- ❌ GDPR/HIPAA/PCI compliant by itself
-
-## The Core Abstraction: ExecutionPlan
-
-```
-LLM Request (untrusted)
-        ↓
-Policy Evaluation
-        ↓
-ExecutionPlan (authorized contract)
-        ↓
-Connector (executes ONLY the plan)
-        ↓
-Result Validation
-        ↓
-Verified Result + Evidence
-```
-
-### ExecutionPlan Structure
-
-```python
-@dataclass(frozen=True)
-class ExecutionPlan:
-    execution_id: str           # Unique ID
-    actor: Actor                # WHO (immutable)
-    resource: str               # WHAT table/resource
-    operation: Operation        # WHICH operation
-    selected_fields: list[str]  # WHICH fields (authorized)
-    enforced_filters: dict      # WHICH rows (enforced)
-    limit: int                  # HOW MANY rows
-    policy_version: str         # WHICH policy
-```
-
-This is what the database executes. Not the LLM's SQL.
-
-## Architecture Layers
-
-### 1. Types (`core/types.py`)
-
-First-class types, not dictionaries:
-
-- `Actor` - Immutable identity (id, tenant_id)
-- `Intent` - Untrusted request from LLM
-- `Request` - Actor + Intent
-- `PolicyDecision` - ALLOW / DENY
-- `ExecutionPlan` - The authorized contract
-- `ExecutionResult` - Validated result
-- `Evidence` - Proof of compliance
-- `AuditEvent` - Audit trail
-
-### 2. Security Boundary (`core/boundary.py`)
-
-```python
-class DataFenceBoundary:
-    def execute(self, actor: Actor, intent: Intent):
-        # 1. Create Request
-        # 2. Evaluate Policy → ALLOW / DENY
-        # 3. If DENY: return DeniedRequest
-        # 4. If ALLOW: create ExecutionPlan
-        # 5. Execute via connector.execute_plan(plan)
-        # 6. Validate result
-        # 7. Generate evidence
-        # 8. Return AllowedRequest
-```
-
-**Critical**: Fail closed on ALL errors.
-
-### 3. Policy Engine (`core/policy_engine.py`)
-
-Evaluates:
-- Is this operation allowed?
-- Which fields can be accessed?
-- Which filters must be enforced? (e.g., tenant_id)
-- What limits apply?
-
-Returns `PolicyDecision` (ALLOW / DENY).
-
-### 4. Connector (`connectors/sqlite_connector.py`)
-
-```python
-class SQLiteConnector:
-    def execute_plan(self, plan: ExecutionPlan):
-        # Generate SQL FROM the plan
-        sql, params = self._generate_sql(plan)
-        # Execute with prepared statement
-        # Return ONLY authorized fields
-```
-
-**Critical**: No method to execute raw LLM SQL.
-
-### 5. Result Validator (`core/boundary.py`)
-
-Even if the connector is compromised:
-
-```python
-class ResultValidator:
-    def validate(self, plan: ExecutionPlan, data: list):
-        # Check: no unauthorized fields
-        # Check: row count within limit
-        # Return: ExecutionResult (verified=True/False)
-```
-
-Security on BOTH sides (request AND result).
-
-## Security Invariants
-
-What the killer demo proves:
-
-1. ✅ Unauthorized field → Never reaches connector
-2. ✅ Unauthorized row → Never returned (tenant isolation)
-3. ✅ Unauthorized tenant → Never accessed
-4. ✅ Unauthorized operation → Never reaches connector
-5. ✅ Missing policy → Fails closed (DENY)
-6. ✅ Invalid policy → Fails closed (DENY)
-7. ✅ LLM SQL → Never executed directly
-8. ✅ Malicious connector → Caught by result validation
-9. ✅ Actor identity → Cannot be overridden
-10. ✅ Policy version → Recorded in evidence
-11. ✅ Execution ID → Unique for every request
-12. ✅ Allowed request → Full provenance
-13. ✅ Denied request → Auditable decision
-
-See `tests/test_security_invariants.py` for proofs.
-
-## The Execution Flow
-
-```
-User: "Show me transactions"
-        ↓
-    LLM Agent
-        ↓
-    generates Intent
-        {
-          resource: "transactions",
-          operation: READ,
-          fields: ["*"],  // SELECT *
-        }
-        ↓
-    DataFence Boundary
-        ↓
-    Policy Evaluation
-        operation: READ → allowed ✓
-        resource: transactions → allowed ✓
-        fields: * → restrict to authorized ⚠
-        ↓
-    ExecutionPlan Created
-        {
-          selected_fields: ["id", "merchant", "amount"],
-          enforced_filters: {"tenant_id": "tenant_a"},
-          limit: 100
-        }
-        ↓
-    Connector Generates SQL
-        SELECT id, merchant, amount
-        FROM transactions
-        WHERE tenant_id = :tenant_id
-        LIMIT 100
-        ↓
-    Database Executes
-        (DataFence's SQL, NOT LLM's "SELECT *")
-        ↓
-    Result Validation
-        ✓ No unauthorized fields
-        ✓ Row count within limit
-        ↓
-    Evidence Generated
-        {
-          execution_id: "exec_a1b2...",
-          policy_version: "banking-v1",
-          row_count: 3
-        }
-        ↓
-    Verified Result Returned
-```
-
-## What's Implemented (v0.3.0)
-
-### Core ✅
-- ExecutionPlan abstraction
-- DataFence Boundary with fail-closed
-- Policy engine (simple, demo-ready)
-- SQLite connector (ExecutionPlan-only)
-- Result validation
-- Evidence generation
-- Audit events
-
-### Demos ✅
-- Killer demo (6 scenarios)
-- Security invariant tests (13+ tests)
-- Local SQLite database
-- 2 tenants, realistic data
-
-### What's NOT Implemented
-
-- ❌ Production connectors (PostgreSQL, Athena, Snowflake need refactoring)
-- ❌ YAML policy file loading
-- ❌ PII detection/redaction (exists but not integrated with new core)
-- ❌ SQL firewall (exists but not integrated)
-- ❌ Framework adapters (OpenAI, Claude, LangChain exist but not refactored)
-- ❌ REST API (exists but not refactored)
-- ❌ CLI (exists but not refactored)
-- ❌ Monitoring/metrics (exists but not integrated)
-
-## Current Project Structure
-
-```
-datafence/
-├── src/datafence/
-│   ├── core/
-│   │   ├── types.py              ✅ NEW - First-class types
-│   │   ├── boundary.py           ✅ NEW - Security boundary
-│   │   ├── policy_engine.py      ✅ NEW - Policy evaluation
-│   │   └── [old files]           ⚠️  Need refactoring
-│   │
-│   ├── connectors/
-│   │   ├── sqlite_connector.py   ✅ NEW - ExecutionPlan-only
-│   │   └── [old files]           ⚠️  Need refactoring
-│   │
-│   ├── integrations/             ⚠️  Experimental - Not refactored
-│   ├── security/                 ⚠️  Experimental - Not integrated
-│   ├── monitoring/               ⚠️  Experimental - Not integrated
-│   └── api.py, cli.py            ⚠️  Experimental - Not refactored
-│
-├── demos/
-│   ├── killer_demo.py            ✅ NEW - 6 scenarios
-│   └── README.md                 ✅ NEW - 30-second proof
-│
-└── tests/
-    └── test_security_invariants.py  ✅ NEW - 13+ tests
-```
-
-## Roadmap
-
-### Phase 1: Harden Core (Current)
-- ✅ ExecutionPlan abstraction
-- ✅ Security boundary
-- ✅ Killer demo
-- ✅ Security tests
-
-### Phase 2: Refactor Existing
-- [ ] Refactor PostgreSQL connector for ExecutionPlan
-- [ ] Refactor Athena connector for ExecutionPlan
-- [ ] Refactor Snowflake connector for ExecutionPlan
-- [ ] Integrate SQL firewall with boundary
-- [ ] Integrate PII detection with boundary
-- [ ] YAML policy file loader
-
-### Phase 3: Framework Adapters
-- [ ] Refactor OpenAI adapter
-- [ ] Refactor Claude adapter
-- [ ] Refactor LangChain adapter
-- [ ] Refactor Langflow component
-- [ ] MCP integration (new)
-
-### Phase 4: Production Readiness
-- [ ] Comprehensive test suite
-- [ ] Performance benchmarks (real measurements)
-- [ ] Production deployment guide
-- [ ] Adversarial security testing
-- [ ] Documentation
-
-## Design Decisions
-
-### Why ExecutionPlan?
-
-**Before**: LLM SQL → Database (dangerous)
-
-**After**: LLM Intent → ExecutionPlan → Database (safe)
-
-The ExecutionPlan is the authorized contract. It's what proves DataFence made the decision, not the LLM.
-
-### Why Fail Closed?
-
-Every error results in DENY:
-- Policy evaluation error → DENY
-- ExecutionPlan creation error → DENY
-- Connector execution error → DENY
-- Result validation error → DENY
-
-Safety over availability.
-
-### Why Result Validation?
-
-Defense in depth. Even if:
-- The connector is compromised
-- The database is misconfigured
-- SQL generation has bugs
-
-Result validation catches unauthorized data.
-
-### Why Frozen Dataclasses?
-
-Immutability = security.
-
-`Actor` cannot be modified after creation.
-`ExecutionPlan` cannot be modified after authorization.
-
-## Performance
-
-**Current**: Not benchmarked.
-
-**Claim**: None.
-
-The killer demo runs in seconds locally. That's all we know.
-
-Production performance depends on:
-- Database latency
-- Network latency
-- Policy complexity
-- Result size
-- Hardware
-
-Don't make blanket claims until measured.
-
-## Compliance
-
-DataFence does NOT make your organization compliant with:
-- GDPR
-- HIPAA
-- PCI DSS
-- SOC 2
-- Any regulation
-
-It provides **controls** that may support compliance requirements.
-
-Compliance requires:
-- Legal review
-- Security audit
-- Process documentation
-- Organizational controls
-- Much more than a Python package
-
-## Security
-
-DataFence enforces policies at the execution boundary.
-
-It does NOT:
-- Prevent LLM hallucinations
-- Detect prompt injection
-- Secure the LLM itself
-- Secure the infrastructure
-- Replace IAM or database permissions
-
-It's an **additional layer** that enforces deterministic authorization.
-
-## The Product Vision
-
-Not: "AI security toolkit with lots of features"
-
-But: "Deterministic authorization boundary for AI agents"
-
-The moat is NOT:
-- SQL firewall
-- PII detection
-- Framework adapters
-- Monitoring
-- Deployment
-
-The moat IS:
-
-> **The database executes ONLY what DataFence authorizes.**
-
-That's the product.
-
-## Current Status
-
-**Version**: 0.3.0 (Prototype)
-
-**What Works**: Killer demo proves the security boundary
-
-**What Doesn't**: Production connectors, integrations need refactoring
-
-**Next**: Harden core, refactor existing code to match new architecture
-
-## Getting Started
-
-```bash
-# Run the killer demo
-cd demos
-python killer_demo.py
-
-# Run security tests
-pytest tests/test_security_invariants.py -v
-```
-
-Read `demos/README.md` for the 30-second proof.
+DataFence is NOT:
+- A banking library
+- A database driver or ORM
+- A SQL firewall (though typed execution makes injection structurally impossible)
+- A replacement for IAM or database permissions
+- A compliance certification
+- A prompt-injection detector
 
 ---
 
-**Bottom Line**: DataFence is a prototype proving that deterministic authorization at the AI-data boundary is possible and valuable. The killer demo shows it works. Now we need to make it production-ready.
+## Ownership Boundary
+
+```
+                    ENTERPRISE APPLICATION
+┌────────────────────────────────────────────────────────┐
+│                                                        │
+│  Application Authentication Layer                      │
+│           │                                            │
+│           ▼                                            │
+│       Principal / Actor                                │
+│           +                                            │
+│       AI Agent / LLM                                   │
+│           │                                            │
+│           ▼                                            │
+│         Intent (untrusted)                             │
+│                                                        │
+└───────────────────────┬────────────────────────────────┘
+                        │
+                        ▼
+           ┌────────────────────────┐
+           │        DATAFENCE       │
+           │                        │
+           │   ResourceRegistry     │  ← WHAT exists?
+           │          ↓             │
+           │      Policy Engine     │  ← WHO can do WHAT?
+           │          ↓             │
+           │   Authorization        │
+           │          ↓             │
+           │  AuthorizedExecution   │  ← signed capability
+           └──────────┬─────────────┘
+                      │
+                      │  AuthorizedExecution
+                      ▼
+           ┌────────────────────────┐
+           │  CUSTOMER BACKEND      │
+           │                        │
+           │  Existing Connector    │  ← verify + execute
+           │  / Data Access Layer   │
+           └──────────┬─────────────┘
+                      │
+                      ▼
+                Enterprise Data
+```
+
+**DataFence owns**: Registry · Policy · Authorization · Capability signing
+
+**Customer owns**: Authentication · Connector · Database · Credentials · Execution
+
+---
+
+## Core Components
+
+### 1. ResourceRegistry (`core/registry.py`)
+
+Answers: **WHAT exists?**
+
+```python
+registry = ResourceRegistry()
+registry.register(ResourceDefinition(
+    name="transactions",
+    fields={
+        "id":          FieldDefinition("id", "integer", DataClassification.INTERNAL),
+        "amount":      FieldDefinition("amount", "decimal", DataClassification.CONFIDENTIAL),
+        "card_number": FieldDefinition("card_number", "string", DataClassification.RESTRICTED),
+        "tenant_id":   FieldDefinition("tenant_id", "string", is_tenant_key=True),
+    },
+    supported_operations=("read",),
+))
+registry.freeze()   # immutable from this point
+```
+
+Responsibilities:
+- Resource name validation
+- Field name and type definitions
+- Data classification (PUBLIC / INTERNAL / CONFIDENTIAL / RESTRICTED)
+- Tenant key identification
+- Supported operation enumeration
+- Validation of intents before policy evaluation
+
+Registry does NOT answer: *who can access what* — that is the Policy's job.
+
+### 2. Policy Engine (`core/policy.py`)
+
+Answers: **WHO can do WHAT, on WHICH resource, with WHAT constraints?**
+
+```python
+policy = DataFencePolicy("my-policy", "1.0", {
+    "transactions": ResourcePolicy(
+        resource="transactions",
+        actions={"read": ActionDecision.ALLOW},
+        allowed_fields=["id", "amount", "merchant", "timestamp"],
+        denied_fields=["card_number", "account_number"],
+        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+        max_rows=100,
+    )
+})
+engine = DataFencePolicyEngine(policy, registry=registry)
+```
+
+Responsibilities:
+- Action authorization (allow/deny per operation)
+- Field allow/deny lists
+- Row-level filter injection (policy INJECTS these; the LLM cannot override them)
+- Row limits
+- Obligations (e.g. `{"audit": True}`)
+
+Policy does NOT execute queries. It produces a `PolicyDecision`.
+
+### 3. DataFenceBoundary (`core/boundary.py`)
+
+The single execution path:
+
+```python
+fence = DataFenceBoundary.create(
+    policy_engine=engine,
+    registry=registry,
+    signing_key=signing_key,
+    capability_audience="my-service",
+)
+
+authorized = fence.authorize(
+    principal=Actor("user:alice", "tenant-acme"),
+    intent=Intent("transactions", Operation.READ, fields=["id", "amount"]),
+)
+```
+
+Internal flow:
+```
+ResourceRegistry.validate_intent()    ← schema check, fail-closed
+PolicyEngine.evaluate()               ← authorization check
+PolicyDecision (ALLOW/DENY)
+    ↓ ALLOW
+AuthorizedExecution._create_signed()  ← HMAC-signed capability
+```
+
+`DataFenceBoundary` has **no `execute()` method**. It only authorizes.
+
+### 4. AuthorizedExecution (`core/capability.py`)
+
+The signed capability handed to the customer's connector:
+
+```
+execution_id        unique identifier per authorization
+actor               authenticated principal (from application)
+resource            authorized resource name
+operation           authorized operation
+selected_fields     exact fields the connector may return
+enforced_predicates typed, lossless predicate list (full operator preserved)
+enforced_filters    EQ-only compatibility view
+limit               maximum rows
+policy_version      which policy version authorized this
+expires_at          capability expiry (UTC)
+audience            which service may consume this
+nonce               unique per issuance
+signature           HMAC-SHA256 over all fields
+```
+
+Critical property: **lossless predicates**. A policy rule `amount > 1000`
+is stored as `{operator: ">", value: 1000}`, not as `{amount: 1000}`. The
+connector compiles the full predicate. Operators are never silently coerced.
+
+### 5. CapabilityVerifier (`core/capability.py`)
+
+The customer connector calls this before executing:
+
+```python
+verifier = CapabilityVerifier(signing_key, expected_audience="my-service")
+verifier.verify(authorized)   # raises CapabilityVerificationError on failure
+result = my_connector.execute(authorized)
+```
+
+Verification order:
+1. Type check
+2. Audience binding
+3. Expiry check
+4. HMAC signature verification (constant-time comparison)
+
+---
+
+## Authorization Flow Detail
+
+```
+Principal (trusted — from app auth)
+    +
+Intent (untrusted — from AI/agent)
+    |
+    v
+DataFenceBoundary.authorize()
+    |
+    ├─ 1. ResourceRegistry.validate_intent()
+    │      ├─ resource exists?              → deny if not
+    │      ├─ operation supported?          → deny if not
+    │      ├─ fields known?                 → deny if not
+    │      └─ filter fields not RESTRICTED? → deny if so
+    │
+    ├─ 2. PolicyEngine.evaluate()
+    │      ├─ action allowed?               → deny if not
+    │      ├─ requested fields authorized?  → deny if not
+    │      ├─ inject row filters            → always applied
+    │      └─ PolicyDecision (ALLOW/DENY)
+    │
+    ├─ 3. Structural validation
+    │      └─ malformed decision            → PolicyError (fail-closed)
+    │
+    └─ 4. Capability construction
+           ├─ intersect fields (policy ∩ agent request)
+           ├─ merge filters (policy takes priority)
+           ├─ resolve :actor_* references
+           ├─ cap row limit (min(agent, policy))
+           └─ HMAC-SHA256 sign all fields
+```
+
+**Every failure path produces a deny or error — never a silent allow.**
+
+---
+
+## Capability Security
+
+### HMAC Canonicalization
+
+All security-relevant fields are covered by the HMAC signature:
+
+```
+resource · operation · selected_fields · enforced_predicates
+actor.id · actor.tenant_id · actor.metadata
+policy_version · limit · expires_at · audience · nonce
+```
+
+Fields are length-prefixed before joining to prevent canonicalization
+collisions from attacker-controlled values containing the separator character.
+
+### Replay Protection
+
+The nonce provides **uniqueness** per issuance — two authorize() calls for
+identical inputs produce different nonces.
+
+**Replay protection** (rejecting a previously-used capability) is a
+connector-side responsibility and requires the connector to record consumed
+nonces. This is a documented limitation; DataFence does not maintain nonce state.
+
+### Audience Binding
+
+A capability is bound to a specific audience tag (e.g. `"customer-data-service"`).
+A connector for `"reporting-service"` must reject a capability issued for
+`"customer-data-service"`. The CapabilityVerifier enforces this.
+
+---
+
+## What DataFence Does NOT Do
+
+| Concern | Owner |
+|---------|-------|
+| Authentication | Application IAM layer |
+| Database credentials | Customer |
+| SQL compilation | Customer connector |
+| Database execution | Customer connector |
+| Connection pooling | Customer |
+| Infrastructure | Customer |
+| Replay prevention (nonce store) | Customer connector |
+| Schema drift detection | Customer (registry must be kept in sync) |
+| DLP / PII scanning | Separate tool |
+| Prompt injection detection | Separate tool |
+| GDPR/HIPAA/PCI compliance | Requires much more than a library |
+
+---
+
+## Project Structure
+
+```
+src/datafence/
+├── __init__.py              ← public API (generic, no domain terms)
+├── core/
+│   ├── boundary.py          ← DataFenceBoundary.authorize()
+│   ├── capability.py        ← AuthorizedExecution, CapabilityVerifier
+│   ├── policy.py            ← DataFencePolicyEngine, YAMLPolicyLoader
+│   ├── registry.py          ← ResourceRegistry, ResourceDefinition
+│   ├── resources.py         ← typed IR (Predicate, Filter, RowLimit, …)
+│   ├── principal.py         ← Principal (richer Actor with roles)
+│   └── types.py             ← Actor, Intent, Request, Operation
+├── connectors/
+│   ├── protocol.py          ← DataConnector protocol + ConnectorResult
+│   ├── memory_connector.py  ← reference in-memory connector (tests/examples)
+│   ├── sqlite_connector.py  ← reference SQLite connector
+│   ├── postgres_connector.py← reference PostgreSQL connector
+│   ├── snowflake_connector.py← reference Snowflake connector
+│   └── athena_connector.py  ← reference Athena connector
+├── integrations/            ← OpenAI, Anthropic, LangChain adapters
+├── mcp/                     ← MCP server + tool wrapper
+├── api.py                   ← FastAPI REST adapter
+├── cli.py                   ← Click CLI
+├── errors.py                ← exception hierarchy
+└── _legacy/                 ← deprecated v0.1–v0.4 code (DO NOT USE)
+
+examples/
+├── basic/                   ← PRIMARY quickstart (generic, domain-neutral)
+└── bank/                    ← domain example (banking on top of DataFence)
+
+tests/
+├── test_authorization_boundary.py  ← core boundary tests
+├── test_security_invariants.py     ← comprehensive security invariant tests
+└── security/
+    ├── test_pii.py
+    └── test_sql_firewall.py
+
+docs/
+├── architecture.md
+├── security.md
+├── threat-model.md
+└── …
+```
+
+---
+
+## Non-Goals
+
+DataFence does not aim to be:
+
+- An IAM replacement
+- A database permission replacement
+- A DLP system
+- A WAF
+- A SQL firewall
+- A compliance certification
+- A hallucination detector
+- A prompt-injection detector
+- A malware scanner
+- A database driver or ORM
+
+It can complement those systems.
