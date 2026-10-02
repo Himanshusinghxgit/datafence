@@ -112,7 +112,10 @@ def describe(policy_file: str, resource: str, format: str):
             output = {
                 "resource": resource,
                 "operations": {k: v.value for k, v in resource_config.actions.items()},
-                "fields": {"allow": resource_config.allowed_fields, "deny": resource_config.denied_fields},
+                "fields": {
+                    "allow": resource_config.allowed_fields,
+                    "deny": resource_config.denied_fields,
+                },
             }
 
             if hasattr(resource_config, "limits") and resource_config.limits:
@@ -129,7 +132,10 @@ def describe(policy_file: str, resource: str, format: str):
             click.echo("=" * 50)
 
             click.echo("\nOperations:")
-            click.echo("  Allowed: " + ", ".join(k for k, v in resource_config.actions.items() if v.value == "allow"))
+            click.echo(
+                "  Allowed: "
+                + ", ".join(k for k, v in resource_config.actions.items() if v.value == "allow")
+            )
             denied = [k for k, v in resource_config.actions.items() if v.value == "deny"]
             if denied:
                 click.echo(f"  Denied: {', '.join(denied)}")

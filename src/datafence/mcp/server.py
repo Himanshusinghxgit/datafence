@@ -245,8 +245,11 @@ class DataFenceMCPServer:
         principal_data = session_context.get("principal")
         if not principal_data:
             raise ValueError("authenticated principal context required")
-        return Actor(id=principal_data["id"], tenant_id=principal_data["tenant_id"],
-                     metadata=principal_data.get("metadata", {}))
+        return Actor(
+            id=principal_data["id"],
+            tenant_id=principal_data["tenant_id"],
+            metadata=principal_data.get("metadata", {}),
+        )
 
     @staticmethod
     def _error_response(message: str) -> dict[str, Any]:

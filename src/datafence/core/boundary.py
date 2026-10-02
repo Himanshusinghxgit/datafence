@@ -166,17 +166,30 @@ class ResultValidator:
                         continue
                     expected = definition.data_type.lower()
                     valid = (
-                        expected in {"string", "text"} and isinstance(value, str)
-                    ) or (
-                        expected in {"integer", "int"}
-                        and isinstance(value, int)
-                        and not isinstance(value, bool)
-                    ) or (
-                        expected in {"decimal", "float", "number"}
-                        and isinstance(value, (int, float))
-                        and not isinstance(value, bool)
-                    ) or (expected in {"boolean", "bool"} and isinstance(value, bool))
-                    if expected not in {"string", "text", "integer", "int", "decimal", "float", "number", "boolean", "bool"}:
+                        (expected in {"string", "text"} and isinstance(value, str))
+                        or (
+                            expected in {"integer", "int"}
+                            and isinstance(value, int)
+                            and not isinstance(value, bool)
+                        )
+                        or (
+                            expected in {"decimal", "float", "number"}
+                            and isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                        )
+                        or (expected in {"boolean", "bool"} and isinstance(value, bool))
+                    )
+                    if expected not in {
+                        "string",
+                        "text",
+                        "integer",
+                        "int",
+                        "decimal",
+                        "float",
+                        "number",
+                        "boolean",
+                        "bool",
+                    }:
                         valid = True
                     if not valid:
                         errors.append(

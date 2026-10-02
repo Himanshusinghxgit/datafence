@@ -60,17 +60,26 @@ def create_api(
         raise ImportError("fastapi required. Install with: pip install 'datafence[api]'")
     app = FastAPI(title=title, description=description, version=version)
     if enable_cors:
-        app.add_middleware(CORSMiddleware, allow_origins=[], allow_credentials=False,
-                           allow_methods=["GET", "POST"], allow_headers=["Authorization", "Content-Type"])
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[],
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
     bearer = HTTPBearer(auto_error=True)
 
     def principal(credentials: HTTPAuthorizationCredentials = Depends(bearer)) -> Actor:  # noqa: B008
         try:
             actor = principal_resolver(credentials)
         except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed") from exc
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed"
+            ) from exc
         if not isinstance(actor, Actor):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication failed"
+            )
         return actor
 
     @app.get("/health", response_model=HealthResponse)
@@ -78,32 +87,66 @@ def create_api(
         return HealthResponse(status="healthy", version=version)
 
     @app.post("/execute", response_model=ExecuteResponse)
-    async def execute(request: ExecuteRequest, actor: Actor = Depends(principal)) -> ExecuteResponse:  # noqa: B008
+    async def execute(
+        request: ExecuteRequest,
+        actor: Actor = Depends(principal),  # noqa: B008
+    ) -> ExecuteResponse:  # noqa: B008
         try:
-            result = boundary.execute(actor, Intent(
-                resource=request.resource, operation=Operation(request.operation.lower()),
-                fields=request.fields, filters=request.filters or {}, limit=request.limit,
-            ))
+            result = boundary.execute(
+                actor,
+                Intent(
+                    resource=request.resource,
+                    operation=Operation(request.operation.lower()),
+                    fields=request.fields,
+                    filters=request.filters or {},
+                    limit=request.limit,
+                ),
+            )
         except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request") from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request"
+            ) from exc
         if isinstance(result, AllowedRequest):
-            return ExecuteResponse(success=True, verified=True, data=result.execution_result.data,
-                row_count=result.execution_result.row_count, decision="allow",
-                evidence_hash=result.evidence.evidence_hash, timestamp=result.evidence.timestamp.isoformat())
-        return ExecuteResponse(success=False, verified=False, decision="deny", reasons=result.decision.reasons,
-            evidence_hash=result.evidence.evidence_hash, timestamp=result.evidence.timestamp.isoformat())
+            return ExecuteResponse(
+                success=True,
+                verified=True,
+                data=result.execution_result.data,
+                row_count=result.execution_result.row_count,
+                decision="allow",
+                evidence_hash=result.evidence.evidence_hash,
+                timestamp=result.evidence.timestamp.isoformat(),
+            )
+        return ExecuteResponse(
+            success=False,
+            verified=False,
+            decision="deny",
+            reasons=result.decision.reasons,
+            evidence_hash=result.evidence.evidence_hash,
+            timestamp=result.evidence.timestamp.isoformat(),
+        )
 
     @app.post("/describe")
     async def describe(request: DescribeRequest, _: Actor = Depends(principal)) -> dict[str, Any]:  # noqa: B008
         resource = boundary._registry.get(request.resource)
         if resource is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found")
-        return {"success": True, "metadata": {"name": resource.name, "fields": resource.field_names(), "description": resource.description}}
+        return {
+            "success": True,
+            "metadata": {
+                "name": resource.name,
+                "fields": resource.field_names(),
+                "description": resource.description,
+            },
+        }
 
     @app.get("/policy")
     async def policy(_: Actor = Depends(principal)) -> dict[str, Any]:  # noqa: B008
         engine = boundary.policy_engine
-        return {"name": engine.policy_name, "version": engine.policy_version, "resources": boundary._registry.all_resources()}
+        return {
+            "name": engine.policy_name,
+            "version": engine.policy_version,
+            "resources": boundary._registry.all_resources(),
+        }
 
     return app
 
