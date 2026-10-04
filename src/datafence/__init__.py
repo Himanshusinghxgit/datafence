@@ -22,6 +22,12 @@ Canonical flow::
           ├─ PolicyEngine.evaluate()             — who can do what
           └─ AuthorizedExecution (HMAC-signed)   — the authorization artifact
                     ↓
+          CapabilityToken.encode(authorized)       ← portable signed token
+                    ↓
+          transport to customer connector
+                    ↓
+          CapabilityVerifier.verify_token(token)   ← connector verifies
+                    ↓
           customer_connector.execute(authorized)  ← customer-owned
                     ↓
           Enterprise data
@@ -40,7 +46,7 @@ Quick start::
         Principal, DataFenceBoundary, Intent, Operation,
         DataFencePolicyEngine, DataFencePolicy, ResourcePolicy, ActionDecision,
         ResourceRegistry, ResourceDefinition, FieldDefinition,
-        CapabilityVerifier,
+        CapabilityToken, CapabilityVerifier,
     )
     from datafence.core.policy import RowRule
     from datafence.core.resources import PredicateOperator
@@ -60,14 +66,15 @@ Quick start::
             "orders",
             actions={"read": ActionDecision.ALLOW},
             allowed_fields=["id", "tenant_id", "total", "status"],
+            filterable_fields=["status", "tenant_id"],
             row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
             max_rows=100,
         )
     })
     engine = DataFencePolicyEngine(policy, registry=registry)
 
-    # 3. Create the authorization boundary
-    key = token_bytes(32)   # keep this secret
+    # 3. Create the authorization boundary (validates policy against registry)
+    key = token_bytes(32)   # keep this secret — minimum 32 bytes
     fence = DataFenceBoundary.create(engine, registry, key)
 
     # 4. Authorize — DataFence decides
@@ -76,9 +83,13 @@ Quick start::
         Intent("orders", Operation.READ, fields=["id", "total", "status"]),
     )
 
-    # 5. Verify and execute — customer decides how to run it
-    CapabilityVerifier(key).verify(authorized)
-    result = my_connector.execute(authorized)   # your code, your database
+    # 5. Transport — encode to a portable signed token
+    token = CapabilityToken.encode(authorized)
+
+    # 6. Verify and execute — customer decides how to run it
+    #    (no DataFence runtime needed on the connector side)
+    verified = CapabilityVerifier(key, expected_audience="datafence").verify_token(token)
+    result = my_connector.execute(verified)   # your code, your database
 
 See ``examples/basic/`` for a fully runnable example.
 See ``docs/architecture.md`` for the security model.
@@ -90,10 +101,12 @@ See ``docs/architecture.md`` for the security model.
 from datafence.core.boundary import DataFenceBoundary
 
 # ---------------------------------------------------------------------------
-# Capability and customer-side verifier
+# Capability, portable token, and customer-side verifier
 # ---------------------------------------------------------------------------
 from datafence.core.capability import (
+    MIN_KEY_BYTES,
     AuthorizedExecution,
+    CapabilityToken,
     CapabilityVerificationError,
     CapabilityVerifier,
 )
@@ -114,9 +127,8 @@ from datafence.core.policy import (
 
 # ---------------------------------------------------------------------------
 # Principal — the trusted authenticated identity
-# Actor is a backward-compatibility alias for Principal.
 # ---------------------------------------------------------------------------
-from datafence.core.principal import Actor, Principal
+from datafence.core.principal import Principal
 
 # ---------------------------------------------------------------------------
 # Resource Registry
@@ -142,7 +154,7 @@ from datafence.core.resources import (
 )
 
 # ---------------------------------------------------------------------------
-# Core types — internal request/decision types are NOT part of the public API
+# Core types
 # ---------------------------------------------------------------------------
 from datafence.core.types import (
     Intent,
@@ -160,18 +172,19 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "1.0.0"
+__version__ = "0.1.0"
 
 __all__ = [
     # ── Core boundary ────────────────────────────────────────────────────
     "DataFenceBoundary",
-    # ── Capability ───────────────────────────────────────────────────────
+    # ── Capability and portable token ────────────────────────────────────
     "AuthorizedExecution",
+    "CapabilityToken",
     "CapabilityVerifier",
     "CapabilityVerificationError",
+    "MIN_KEY_BYTES",
     # ── Principal / identity ─────────────────────────────────────────────
     "Principal",
-    "Actor",           # backward-compatibility alias
     # ── Intent and operation ─────────────────────────────────────────────
     "Intent",
     "Operation",

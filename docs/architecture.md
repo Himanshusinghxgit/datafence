@@ -77,9 +77,12 @@ DataFence ends at `AuthorizedExecution`. Everything below is customer-owned.
 
 - Answers: **Who can access what, under which constraints?**
 - Defines field allow/deny lists per resource.
+- Defines `filterable_fields`: only these fields may be used in agent intent filters (prevents side-channel probing via arbitrary filter combinations).
 - Injects mandatory row filters — the AI cannot override these.
 - Sets row limits — the AI may request fewer, never more.
+- Carries `obligations` (e.g. `{"audit": true}`) forwarded into `AuthorizedExecution`.
 - Loaded from code or YAML.
+- **Compiled and validated at `DataFenceBoundary.create()` time** — unknown resources/fields/operations and missing tenant isolation rules are rejected before the boundary serves any request.
 
 ### DataFenceBoundary
 
@@ -94,10 +97,23 @@ DataFence ends at `AuthorizedExecution`. Everything below is customer-owned.
 ### AuthorizedExecution
 
 - The product of DataFence authorization.
-- HMAC-SHA256 signed over all security-relevant fields.
-- Immutable frozen dataclass.
-- Single predicate representation — no legacy dual fields.
+- HMAC-SHA256 signed over **all** security-relevant fields: execution_id, created_at,
+  actor.id, actor.tenant_id, actor.roles, actor.attributes, resource, operation,
+  selected_fields, predicates, limit, policy_version, policy_decisions, obligations,
+  expires_at, audience, nonce.
+- **Deeply immutable**: `selected_fields`, `predicates`, and `policy_decisions` are
+  stored as tuples; `principal.attributes` is a `MappingProxyType`.
+- Carries `obligations` from the policy for the connector/application to act on.
 - The customer connector MUST verify before executing.
+
+### CapabilityToken
+
+- **Portable wire format** for `AuthorizedExecution`.
+- JSON object containing all capability fields **plus** the HMAC signature (hex).
+- Includes `dfv` (DataFence Version) field for forward-compatibility rejection.
+- Encode: `CapabilityToken.encode(capability)` → JSON string.
+- Decode+verify: `CapabilityVerifier.verify_token(token_str)` → verified capability.
+- Connector can verify without holding a DataFence runtime object — only the key needed.
 
 ### CapabilityVerifier
 
@@ -116,7 +132,25 @@ DataFence ends at `AuthorizedExecution`. Everything below is customer-owned.
 
 **Predicates are lossless** — `amount > 1000` stays `amount > 1000`. Typed `PredicateOperator` enum; no string coercion.
 
-**Capability forgery is cryptographically prevented** — HMAC covers: execution_id, created_at, actor.id, actor.tenant_id, actor.attributes, resource, operation, fields, predicates, limit, policy_version, policy_decisions, expires_at, audience, nonce.
+**Capability forgery is cryptographically prevented** — HMAC-SHA256 covers: execution_id, created_at, actor.id, actor.tenant_id, **actor.roles** (new in v0.1), actor.attributes, resource, operation, fields, predicates, limit, policy_version, policy_decisions, obligations, expires_at, audience, nonce.
+
+**Roles are signed** — `principal.roles` is included in the HMAC canonical representation. A tampered role list invalidates the capability signature.
+
+**Policy is validated at boundary creation** — `DataFenceBoundary.create()` rejects: unknown resources, unknown fields, unsupported operations, missing tenant row rules on tenant-scoped resources. Misconfiguration fails at startup, not at request time.
+
+**Policy is frozen at boundary creation** — the policy snapshot is deep-copied before the boundary serves requests. Mutations to the caller's `DataFencePolicy` objects have no effect.
+
+**Filter authorization** — agent-supplied filters are only accepted on fields listed in `filterable_fields` (or, if unset, `allowed_fields`). RESTRICTED fields can never be used as filters.
+
+**RESTRICTED fields auto-denied** — fields classified `DataClassification.RESTRICTED` in the registry are automatically removed from `allowed_fields` during policy evaluation, even if the policy explicitly lists them.
+
+**Obligations are carried and signed** — `obligations` from the policy (e.g. `{"audit": true}`) are forwarded into `AuthorizedExecution` and included in the HMAC, so they cannot be stripped in transit.
+
+**Capabilities are portable** — `CapabilityToken.encode(capability)` produces a JSON wire format that includes the full HMAC signature. The connector can verify the token without a DataFence runtime object:
+
+```python
+capability = CapabilityVerifier(key, expected_audience="my-service").verify_token(token_str)
+```
 
 **DataFence does not execute** — `DataFenceBoundary` has no `execute()`. It holds no connector, no connection, no credentials.
 
@@ -152,7 +186,7 @@ The connector: verifies signature + expiry + audience, translates `filter_constr
 | ResourceRegistry, ResourceDefinition, FieldDefinition | Core |
 | DataFencePolicy, PolicyEngine, PolicyDecision | Core |
 | DataFenceBoundary | Core |
-| AuthorizedExecution, CapabilityVerifier | Core |
+| AuthorizedExecution, CapabilityToken, CapabilityVerifier | Core |
 | Filter, Predicate, PredicateOperator | Core |
 | REST API adapter (`datafence.api`) | Optional |
 | CLI (`datafence.cli`) | Optional |

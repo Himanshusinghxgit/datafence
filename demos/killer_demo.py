@@ -34,7 +34,6 @@ import dataclasses
 from secrets import token_bytes
 
 from datafence import (
-    Actor,
     CapabilityVerifier,
     DataFenceBoundary,
     DataFencePolicy,
@@ -42,14 +41,15 @@ from datafence import (
     FieldDefinition,
     Intent,
     Operation,
+    Principal,
     ResourceDefinition,
     ResourceRegistry,
     ResourcePolicy,
     ActionDecision,
     RowRule,
 )
-from datafence.connectors.memory_connector import InMemoryReferenceConnector
-from datafence.core.capability import CapabilityVerificationError
+from examples.reference_connector.memory import InMemoryReferenceConnector
+from datafence.core.capability import CapabilityToken, CapabilityVerificationError
 from datafence.core.resources import PredicateOperator
 from datafence.errors import PolicyDeniedError
 
@@ -107,6 +107,7 @@ def build_fence() -> tuple[DataFenceBoundary, InMemoryReferenceConnector, bytes]
             actions={"read": ActionDecision.ALLOW},
             allowed_fields=["id", "tenant_id", "merchant", "amount", "timestamp"],
             denied_fields=["card_number"],
+            filterable_fields=["id", "tenant_id", "merchant"],
             row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
             max_rows=50,
         ),
@@ -115,6 +116,7 @@ def build_fence() -> tuple[DataFenceBoundary, InMemoryReferenceConnector, bytes]
             actions={"read": ActionDecision.ALLOW},
             allowed_fields=["id", "tenant_id", "name", "email"],
             denied_fields=["ssn"],
+            filterable_fields=["id", "tenant_id"],
             row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
             max_rows=50,
         ),
@@ -168,7 +170,7 @@ def run_demo() -> None:
     # ------------------------------------------------------------------
     sep(1, "Authorized read — bank_a agent reads transactions")
 
-    principal = Actor(id="agent:finance", tenant_id="bank_a")
+    principal = Principal(id="agent:finance", tenant_id="bank_a")
     intent = Intent("transactions", Operation.READ,
                     fields=["id", "merchant", "amount"], limit=10)
 
@@ -255,21 +257,25 @@ def run_demo() -> None:
         ok(f"Forged capability rejected: {exc}")
 
     # ------------------------------------------------------------------
-    # Scenario 7: customer-side verifier
+    # Scenario 7: CapabilityToken — portable signed token transport
     # ------------------------------------------------------------------
-    sep(7, "CapabilityVerifier — customer-side signature verification")
+    sep(7, "CapabilityToken — portable signed token (wire format)")
 
     cap7 = fence.authorize(
         principal, Intent("customers", Operation.READ, fields=["id", "name"])
     )
+    token = CapabilityToken.encode(cap7)
+    ok(f"Token encoded: {token[:60]}...")
+
+    # Connector verifies without needing the DataFence boundary object
     verifier = CapabilityVerifier(signing_key, expected_audience="demo-service")
-    verifier.verify(cap7)
-    ok(f"Capability verified: {cap7.execution_id}")
+    verified = verifier.verify_token(token)
+    ok(f"Token verified: execution_id={verified.execution_id}")
 
     # Wrong key
     bad_verifier = CapabilityVerifier(token_bytes(32), expected_audience="demo-service")
     try:
-        bad_verifier.verify(cap7)
+        bad_verifier.verify_token(token)
         fail("Wrong key should have failed!")
     except CapabilityVerificationError:
         ok("Wrong signing key correctly rejected")

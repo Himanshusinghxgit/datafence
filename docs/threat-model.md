@@ -108,11 +108,18 @@ Add CI checks that compare registry definitions against the live schema.
 | LLM requests unauthorized field | Registry + policy deny | None |
 | LLM requests unauthorized tenant data | Policy-injected row filter | None |
 | LLM supplies raw SQL | No raw SQL path exists | None |
-| Tampered capability | HMAC verification | Signing key compromise |
+| LLM uses unauthorized filter field | filterable_fields check at policy eval | None |
+| LLM probes RESTRICTED field via filter | Registry + policy deny | None |
+| Tampered capability | HMAC verification (all fields incl. roles) | Signing key compromise |
 | Forged capability | HMAC verification | Signing key compromise |
+| Tampered CapabilityToken | HMAC embedded in token | Signing key compromise |
+| Role injection via tampered token | roles are HMAC-signed | None |
+| Obligations stripped from token | obligations are HMAC-signed | None |
 | Expired capability replayed | Expiry check | Within TTL window |
 | Cross-service capability use | Audience binding | None |
 | Within-TTL replay | — | Nonce store (connector responsibility) |
 | Schema drift | — | Registry must be kept in sync |
 | Runtime process compromise | — | Out of scope |
-| Policy misconfiguration | DataClassification, unknown-op fail-closed | Operator error |
+| Policy misconfiguration | Compile-time validation; DataClassification auto-deny; tenant row rule required | Operator error |
+| Missing tenant row rule | Rejected at DataFenceBoundary.create() | None |
+| RESTRICTED field in output | Auto-denied regardless of policy allow_fields | None |

@@ -41,6 +41,7 @@ def create_bank_policy() -> DataFencePolicyEngine:
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "customer_id", "merchant", "amount", "timestamp"],
                 denied_fields=["card_number", "account_number"],
+                filterable_fields=["id", "tenant_id", "merchant", "customer_id"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=100,
                 obligations={"audit": True},
@@ -50,16 +51,17 @@ def create_bank_policy() -> DataFencePolicyEngine:
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "name", "email"],
                 denied_fields=["ssn", "account_number"],
+                filterable_fields=["id", "tenant_id"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=100,
             ),
             "accounts": ResourcePolicy(
                 resource="accounts",
-                actions={},  # no operations allowed — implicit deny
+                actions={},  # no operations allowed — implicit deny for all
                 allowed_fields=[],
                 denied_fields=["account_number", "balance"],
                 row_rules=[],
-                max_rows=0,
+                max_rows=1,  # positive value required; never reached (no ALLOW actions)
             ),
         },
     )

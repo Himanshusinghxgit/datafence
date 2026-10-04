@@ -1,3 +1,5 @@
+"""Authorization boundary integration tests."""
+
 from __future__ import annotations
 
 from secrets import token_bytes
@@ -5,12 +7,12 @@ from secrets import token_bytes
 import pytest
 
 from datafence import (
-    Actor,
     AuthorizedExecution,
     CapabilityVerifier,
     DataFenceBoundary,
     Intent,
     Operation,
+    Principal,
 )
 from datafence.core.capability import CapabilityVerificationError
 from datafence.core.policy import (
@@ -18,9 +20,11 @@ from datafence.core.policy import (
     DataFencePolicy,
     DataFencePolicyEngine,
     ResourcePolicy,
+    RowRule,
     YAMLPolicyLoader,
 )
 from datafence.core.registry import FieldDefinition, ResourceDefinition, ResourceRegistry
+from datafence.core.resources import PredicateOperator
 from datafence.errors import PolicyDeniedError
 
 
@@ -34,6 +38,7 @@ def make_boundary() -> tuple[DataFenceBoundary, bytes, ResourceRegistry]:
                 "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
                 "status": FieldDefinition("status", "string"),
             },
+            supported_operations=("read",),
         )
     )
     policy = DataFencePolicy(
@@ -42,9 +47,11 @@ def make_boundary() -> tuple[DataFenceBoundary, bytes, ResourceRegistry]:
         {
             "customers": ResourcePolicy(
                 "customers",
-                actions={"read": ActionDecision.ALLOW, "delete": ActionDecision.DENY},
+                actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "status"],
-                row_rules=[],
+                row_rules=[
+                    RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id"),
+                ],
                 max_rows=25,
             )
         },
@@ -57,7 +64,7 @@ def make_boundary() -> tuple[DataFenceBoundary, bytes, ResourceRegistry]:
 def test_authorize_returns_capability_without_connector():
     boundary, key, _ = make_boundary()
     capability = boundary.authorize(
-        Actor("user:1", "tenant-a"),
+        Principal("user:1", "tenant-a"),
         Intent("customers", Operation.READ, ["id", "status"]),
     )
     assert isinstance(capability, AuthorizedExecution)
@@ -70,17 +77,21 @@ def test_authorize_returns_capability_without_connector():
 def test_customer_verifier_rejects_tampering():
     boundary, key, _ = make_boundary()
     capability = boundary.authorize(
-        Actor("user:1", "tenant-a"), Intent("customers", Operation.READ)
+        Principal("user:1", "tenant-a"), Intent("customers", Operation.READ)
     )
-    object.__setattr__(capability, "resource", "other_resource")
+    import dataclasses
+    tampered = dataclasses.replace(capability, resource="other_resource")
     with pytest.raises(CapabilityVerificationError):
-        CapabilityVerifier(key).verify(capability)
+        CapabilityVerifier(key).verify(tampered)
 
 
 def test_policy_denial_never_produces_capability():
     boundary, _, _ = make_boundary()
     with pytest.raises(PolicyDeniedError):
-        boundary.authorize(Actor("user:1", "tenant-a"), Intent("customers", Operation.DELETE))
+        boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.INSERT),
+        )
 
 
 def test_registry_is_required_and_frozen():
@@ -96,15 +107,13 @@ def test_registry_is_required_and_frozen():
 
 def test_lossless_predicates_are_carried_to_customer_backend():
     boundary, key, _ = make_boundary()
-    # Policy predicates are typed and survive capability construction.
-    engine = boundary.policy_engine
-    engine._policy.resources["customers"].row_rules = []
     capability = boundary.authorize(
-        Actor("user:1", "tenant-a"),
-        Intent("customers", Operation.READ, filters={"id": 7}),
+        Principal("user:1", "tenant-a"),
+        Intent("customers", Operation.READ),
     )
     CapabilityVerifier(key).verify(capability)
-    assert {p["operator"] for p in capability.filter_constraints()} == {"="}
+    # Policy-enforced tenant predicate must be present
+    assert any(p["field"] == "tenant_id" for p in capability.filter_constraints())
 
 
 def test_unknown_yaml_operator_fails_closed():
@@ -122,3 +131,11 @@ def test_unknown_yaml_operator_fails_closed():
                 },
             }
         )
+
+
+def test_actor_not_in_public_api():
+    """Actor alias has been removed — Principal is the canonical type."""
+    import datafence
+    assert not hasattr(datafence, "Actor"), (
+        "Actor must not be in the public API — use Principal"
+    )

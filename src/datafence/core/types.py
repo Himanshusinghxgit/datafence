@@ -16,14 +16,8 @@ DataFence does NOT own:
 
 Historical note: ExecutionPlan, ExecutionResult, Evidence, AllowedRequest,
 and DeniedRequest were v0.3 objects that implied the boundary executed
-database operations. They have been removed. The canonical output of
-DataFenceBoundary is AuthorizedExecution (see capability.py).
-
-Principal / Actor
------------------
-The Principal type lives in datafence.core.principal.
-"Actor" is a backward-compatibility alias for Principal defined there.
-This module re-exports both names for convenience.
+database operations. They have been removed.
+The canonical output of DataFenceBoundary is AuthorizedExecution (see capability.py).
 """
 
 from __future__ import annotations
@@ -35,7 +29,8 @@ from typing import Any
 from uuid import uuid4
 
 # Re-export so callers can import from either module.
-from datafence.core.principal import Actor, Principal  # noqa: F401
+# Re-export so callers can import Principal from either module.
+from datafence.core.principal import Principal  # noqa: F401
 
 
 class Operation(Enum):

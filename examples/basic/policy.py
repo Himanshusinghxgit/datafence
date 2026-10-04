@@ -41,6 +41,7 @@ def create_policy() -> DataFencePolicyEngine:
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "customer_id", "total", "status", "created_at"],
                 denied_fields=[],
+                filterable_fields=["id", "tenant_id", "status", "customer_id"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=100,
                 obligations={"audit": True},
@@ -50,6 +51,7 @@ def create_policy() -> DataFencePolicyEngine:
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "title", "status", "created_at"],
                 denied_fields=["internal_notes"],  # explicitly excluded
+                filterable_fields=["id", "tenant_id", "status"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=50,
             ),
@@ -58,6 +60,7 @@ def create_policy() -> DataFencePolicyEngine:
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "name", "email"],
                 denied_fields=["ssn"],  # RESTRICTED — never accessible
+                filterable_fields=["id", "tenant_id"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=200,
             ),

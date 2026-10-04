@@ -2,9 +2,10 @@
 DataFence Principal model.
 
 A Principal is an authenticated identity supplied by the host application.
-DataFence does NOT authenticate principals — that is the application's responsibility.
+DataFence does NOT authenticate principals — that is the application's
+responsibility.
 
-Trust boundary:
+Trust boundary::
 
     [App Authentication]
             ↓
@@ -15,11 +16,18 @@ Trust boundary:
 The LLM/agent supplies Intent (untrusted).
 The application supplies Principal (trusted).
 These two inputs must never be confused.
+
+Deep immutability
+-----------------
+``Principal`` is a frozen dataclass.  ``roles`` is stored as a
+``tuple[str, ...]`` and ``attributes`` is stored via a read-only proxy
+(``types.MappingProxyType``).  Neither can be mutated after construction.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 
@@ -45,22 +53,32 @@ class Principal:
         Tenant the principal belongs to. Used for mandatory row-level isolation.
     roles : tuple[str, ...]
         Roles granted by the application (e.g. ``("finance:read", "audit:read")``).
-        Policy rules can match on roles.
-    attributes : dict[str, Any]
+        Policy rules can match on roles.  Roles are included in the HMAC
+        canonical representation so that tampering is detected.
+    attributes : MappingProxyType
         Arbitrary key/value context (e.g. ``{"department": "finance"}``).
         Policy rules can reference attributes for fine-grained decisions.
+        Stored as an immutable mapping proxy.
     """
 
     id: str
     tenant_id: str
     roles: tuple[str, ...] = field(default_factory=tuple)
-    attributes: dict[str, Any] = field(default_factory=dict)
+    attributes: Any = field(default_factory=dict)  # coerced to MappingProxyType in __post_init__
 
     def __post_init__(self) -> None:
         if not self.id:
             raise ValueError("Principal.id cannot be empty")
         if not self.tenant_id:
             raise ValueError("Principal.tenant_id cannot be empty")
+        # Coerce roles to tuple for deep immutability
+        if not isinstance(self.roles, tuple):
+            object.__setattr__(self, "roles", tuple(self.roles))
+        # Coerce attributes to an immutable mapping proxy
+        if not isinstance(self.attributes, MappingProxyType):
+            object.__setattr__(
+                self, "attributes", MappingProxyType(dict(self.attributes))
+            )
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -79,18 +97,10 @@ class Principal:
         return self.attributes.get(key, default)
 
     # ------------------------------------------------------------------
-    # Legacy compatibility
+    # Backward-compatibility property
     # ------------------------------------------------------------------
 
     @property
-    def metadata(self) -> dict[str, Any]:
-        """Alias for attributes — backward compatibility with Actor.metadata."""
+    def metadata(self) -> Any:
+        """Alias for ``attributes`` — backward compatibility with older code."""
         return self.attributes
-
-
-# ---------------------------------------------------------------------------
-# Backward-compatibility alias
-# ---------------------------------------------------------------------------
-# The v0.3/v0.4 codebase used the name "Actor".  Both names now refer to the
-# same class.  New code should use Principal.
-Actor = Principal

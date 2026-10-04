@@ -5,11 +5,16 @@ These tests prove the critical security properties of DataFence:
 
     1.  Authorization — allow/deny correctness
     2.  Capability integrity — HMAC covers every security-relevant field
+                              including principal.roles (Phase 3)
     3.  Predicate losslessness — all operators survive the full pipeline
     4.  Registry validation — fail-closed on unknown resources / fields / ops
     5.  Identity model — LLM cannot choose or override the principal
     6.  Architecture — DataFence does not execute data, holds no connector
     7.  Connector end-to-end — InMemoryReferenceConnector enforces all rules
+    8.  MCP security invariants
+    9.  Package boundary invariants
+   10.  Hardening invariants — key length, immutability, policy freeze,
+        obligations, CapabilityToken, tenant isolation, filter authorization
 
 A failing test is a security regression.
 """
@@ -17,17 +22,19 @@ A failing test is a security regression.
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 from secrets import token_bytes
 from typing import Any
 
 import pytest
 
-# Actor alias must still work
 from datafence import (
+    MIN_KEY_BYTES,
     ActionDecision,
-    Actor,
     AuthorizedExecution,
+    CapabilityToken,
+    CapabilityVerificationError,
     CapabilityVerifier,
     DataFenceBoundary,
     DataFencePolicy,
@@ -42,9 +49,8 @@ from datafence import (
     RowRule,
     YAMLPolicyLoader,
 )
-from datafence.core.capability import CapabilityVerificationError
 from datafence.core.resources import PredicateOperator
-from datafence.errors import PolicyDeniedError, PolicyError
+from datafence.errors import ConfigurationError, PolicyDeniedError, PolicyError
 from examples.reference_connector.memory import InMemoryReferenceConnector
 
 # ---------------------------------------------------------------------------
@@ -94,10 +100,10 @@ def _make_policy(registry: ResourceRegistry) -> DataFencePolicyEngine:
                 "customers",
                 actions={
                     "read": ActionDecision.ALLOW,
-                    "delete": ActionDecision.DENY,
                 },
                 allowed_fields=["id", "tenant_id", "name", "email"],
                 denied_fields=["ssn"],
+                filterable_fields=["id", "tenant_id", "name"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=25,
             ),
@@ -105,6 +111,7 @@ def _make_policy(registry: ResourceRegistry) -> DataFencePolicyEngine:
                 "orders",
                 actions={"read": ActionDecision.ALLOW},
                 allowed_fields=["id", "tenant_id", "total", "status"],
+                filterable_fields=["id", "tenant_id", "status"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
                 max_rows=50,
             ),
@@ -145,21 +152,12 @@ class TestAuthorization:
         assert "id" in cap.selected_fields
         assert "name" in cap.selected_fields
 
-    def test_actor_alias_also_works(self) -> None:
-        """Actor is a backward-compatibility alias — must work identically to Principal."""
-        boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(
-            Actor("user:1", "tenant-a"),
-            Intent("customers", Operation.READ, ["id"]),
-        )
-        assert isinstance(cap, AuthorizedExecution)
-
     def test_denied_operation_raises(self) -> None:
         boundary, _, _ = _make_boundary()
         with pytest.raises(PolicyDeniedError):
             boundary.authorize(
                 Principal("user:1", "tenant-a"),
-                Intent("customers", Operation.DELETE),
+                Intent("customers", Operation.INSERT),
             )
 
     def test_different_tenant_gets_own_filter(self) -> None:
@@ -239,7 +237,6 @@ class TestAuthorization:
                 Principal("user:1", "tenant-a"),
                 Intent("customers", Operation.INSERT),
             )
-
     def test_row_limit_capped_by_policy(self) -> None:
         boundary, _, _ = _make_boundary()
         cap = boundary.authorize(
@@ -289,7 +286,7 @@ class TestCapabilityIntegrity:
         boundary, key, _ = _make_boundary()
         cap = boundary.authorize(Principal("user:1", "tenant-a"),
                                  Intent("customers", Operation.READ, ["id"]))
-        assert not dataclasses.replace(cap, operation=Operation.DELETE).verify_signature(key)
+        assert not dataclasses.replace(cap, operation=Operation.INSERT).verify_signature(key)
 
     def test_tampered_fields_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
@@ -613,10 +610,12 @@ class TestIdentityModel:
         with pytest.raises((TypeError, dataclasses.FrozenInstanceError)):
             cap.resource = "hacked"  # type: ignore[misc]
 
-    def test_principal_and_actor_are_the_same_type(self) -> None:
-        """Actor is a backward-compatibility alias for Principal."""
-        from datafence import Actor, Principal
-        assert Actor is Principal
+    def test_actor_removed_from_public_api(self) -> None:
+        """Actor alias has been removed — Principal is the only identity type."""
+        import datafence
+        assert not hasattr(datafence, "Actor"), (
+            "Actor must not be in the public API — use Principal"
+        )
 
 
 # ===========================================================================
@@ -938,9 +937,10 @@ class TestMCPSecurityInvariants:
         """A denied MCP response must contain denial reasons, not data."""
         import json
         server, _, _ = self._make_server()
+        # Request a field that doesn't exist → denial
         response = server.handle_call_tool(
             tool_name="datafence_query",
-            arguments={"resource": "customers", "operation": "delete"},
+            arguments={"resource": "nonexistent_resource"},
             session_context={"user_id": "user:1", "tenant_id": "tenant-a"},
         )
         assert response.get("isError") is True
@@ -1130,4 +1130,533 @@ class TestPackageBoundaryInvariants:
         for name in required:
             assert hasattr(datafence, name), (
                 f"Expected {name!r} in datafence public API"
+            )
+
+
+# ===========================================================================
+# 10. Hardening invariants (Phase 1–10)
+# ===========================================================================
+
+
+class TestCapabilityTokenCodec:
+    """Phase 1: CapabilityToken — portable signed token round-trip."""
+
+    def test_encode_decode_round_trip(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id", "name"]),
+        )
+        token = CapabilityToken.encode(cap)
+        restored = CapabilityVerifier(key, expected_audience="test-service").verify_token(token)
+        assert restored.execution_id == cap.execution_id
+        assert set(restored.selected_fields) == set(cap.selected_fields)
+
+    def test_token_is_json_string(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        token = CapabilityToken.encode(cap)
+        data = json.loads(token)
+        assert isinstance(data, dict)
+        assert "dfv" in data
+        assert "sig" in data
+
+    def test_token_contains_signature_hex(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        sig = bytes.fromhex(data["sig"])
+        assert len(sig) == 32  # HMAC-SHA256 = 32 bytes
+
+    def test_token_version_field_is_1(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        assert data["dfv"] == 1
+
+    def test_wrong_token_version_rejected(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        data["dfv"] = 99
+        with pytest.raises(CapabilityVerificationError, match="version"):
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(
+                json.dumps(data)
+            )
+
+    def test_malformed_json_rejected(self) -> None:
+        boundary, key, _ = _make_boundary()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode("not valid json{{")
+
+    def test_missing_required_field_rejected(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        del data["execution_id"]
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(json.dumps(data))
+
+    def test_token_tamper_resource_detected(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        data["resource"] = "evil_table"
+        with pytest.raises(CapabilityVerificationError, match="signature"):
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(
+                json.dumps(data)
+            )
+
+    def test_token_tamper_roles_detected(self) -> None:
+        """principal.roles are signed — role injection via token must be detected."""
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        data["actor_roles"] = ["admin", "superuser"]
+        with pytest.raises(CapabilityVerificationError, match="signature"):
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(
+                json.dumps(data)
+            )
+
+    def test_connector_verifies_without_boundary(self) -> None:
+        """Connector can verify a token with only the key — no DataFence runtime needed."""
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        token = CapabilityToken.encode(cap)
+        # Simulate a separate process — no boundary or engine available
+        verifier = CapabilityVerifier(key, expected_audience="test-service")
+        verified = verifier.verify_token(token)
+        assert verified.execution_id == cap.execution_id
+
+    def test_obligations_in_token(self) -> None:
+        """Obligations from policy are carried in the token."""
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "audit_resource",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            },
+            supported_operations=("read",),
+        ))
+        policy = DataFencePolicy("p", "1", {"audit_resource": ResourcePolicy(
+            "audit_resource",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+            obligations={"audit": True, "notify": "compliance@example.com"},
+        )})
+        engine = DataFencePolicyEngine(policy, registry=reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(engine, reg, key, capability_audience="test-service")
+        cap = b.authorize(Principal("u", "t-a"), Intent("audit_resource", Operation.READ))
+        assert cap.obligations.get("audit") is True
+        data = json.loads(CapabilityToken.encode(cap))
+        assert data["obligations"]["audit"] is True
+
+
+class TestDeepImmutability:
+    """Phase 2: deep immutability — tuples, no mutable interior state."""
+
+    def test_selected_fields_is_tuple(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id", "name"]),
+        )
+        assert isinstance(cap.selected_fields, tuple)
+
+    def test_predicates_is_tuple(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ),
+        )
+        assert isinstance(cap.predicates, tuple)
+
+    def test_policy_decisions_is_tuple(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ),
+        )
+        assert isinstance(cap.policy_decisions, tuple)
+
+    def test_cannot_append_to_selected_fields(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        with pytest.raises((AttributeError, TypeError)):
+            cap.selected_fields.append("injected")  # type: ignore[union-attr]
+
+    def test_principal_roles_is_tuple(self) -> None:
+        p = Principal("u", "t", roles=["admin", "user"])
+        assert isinstance(p.roles, tuple)
+
+    def test_principal_attributes_is_immutable_proxy(self) -> None:
+        from types import MappingProxyType
+        p = Principal("u", "t", attributes={"dept": "finance"})
+        assert isinstance(p.attributes, MappingProxyType)
+        with pytest.raises((TypeError, AttributeError)):
+            p.attributes["injected"] = "value"  # type: ignore[index]
+
+    def test_filter_constraints_returns_defensive_copy(self) -> None:
+        boundary, _, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ),
+        )
+        c1 = cap.filter_constraints()
+        c2 = cap.filter_constraints()
+        assert c1 is not c2  # different list objects
+
+
+class TestRolesInHMAC:
+    """Phase 3: principal.roles must be included in the HMAC canonical representation."""
+
+    def test_role_tampering_invalidates_signature(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a", roles=("analyst",)),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        # Replace actor with tampered roles
+        tampered_actor = dataclasses.replace(cap.actor, roles=("admin", "superuser"))
+        tampered = dataclasses.replace(cap, actor=tampered_actor)
+        assert not tampered.verify_signature(key)
+
+    def test_role_addition_invalidates_signature(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        tampered_actor = dataclasses.replace(cap.actor, roles=("superadmin",))
+        tampered = dataclasses.replace(cap, actor=tampered_actor)
+        assert not tampered.verify_signature(key)
+
+    def test_roles_survive_token_round_trip(self) -> None:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a", roles=("finance:read", "audit:read")),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        token = CapabilityToken.encode(cap)
+        restored = CapabilityToken.decode(token)
+        assert set(restored.actor.roles) == {"finance:read", "audit:read"}
+
+
+class TestMinKeyLength:
+    """Phase 4: minimum 32-byte key enforcement."""
+
+    def test_min_key_constant(self) -> None:
+        assert MIN_KEY_BYTES == 32
+
+    def test_short_key_rejected_at_boundary_create(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "things",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            },
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("p", "1", {"things": ResourcePolicy(
+            "things",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ValueError, match="32"):
+            DataFenceBoundary.create(engine, reg, b"too_short_key_123")
+
+    def test_short_key_rejected_at_verifier(self) -> None:
+        with pytest.raises(ValueError, match="32"):
+            CapabilityVerifier(b"short", expected_audience="test")
+
+    def test_exactly_32_bytes_accepted(self) -> None:
+        boundary, key, _ = _make_boundary()
+        assert len(key) >= 32
+        # Verifier with exactly 32 bytes should not raise
+        CapabilityVerifier(token_bytes(32), expected_audience="test")
+
+
+class TestPolicyCompilation:
+    """Phase 5: compile-time policy+registry validation."""
+
+    def test_policy_referencing_unknown_resource_rejected(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "real_resource",
+            fields={"id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("p", "1", {
+            "real_resource": ResourcePolicy(
+                "real_resource",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=["id"],
+                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                max_rows=10,
+            ),
+            "nonexistent_resource": ResourcePolicy(
+                "nonexistent_resource",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=["id"],
+                max_rows=10,
+            ),
+        })
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ConfigurationError, match="nonexistent_resource"):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    def test_policy_referencing_unknown_field_rejected(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "items",
+            fields={"id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "ghost_field"],  # ghost_field doesn't exist
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ConfigurationError, match="ghost_field"):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    def test_policy_referencing_unsupported_operation_rejected(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "things",
+            fields={"id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
+            supported_operations=("read",),  # only read supported
+        ))
+        pol = DataFencePolicy("p", "1", {"things": ResourcePolicy(
+            "things",
+            actions={"read": ActionDecision.ALLOW, "delete": ActionDecision.ALLOW},
+            allowed_fields=["id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ConfigurationError, match="delete"):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+
+class TestPolicyFreeze:
+    """Phase 6: policy mutation after boundary creation has no effect."""
+
+    def test_policy_mutation_does_not_affect_serving_boundary(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "docs",
+            fields={"id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "title": FieldDefinition("title", "string")},
+            supported_operations=("read",),
+        ))
+        rp = ResourcePolicy(
+            "docs",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "title"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )
+        pol = DataFencePolicy("p", "1", {"docs": rp})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(engine, reg, key, capability_audience="test")
+
+        # Mutate the original ResourcePolicy row_rules after boundary creation
+        rp.row_rules.clear()  # would remove tenant isolation if policy is not frozen
+
+        # Boundary must still enforce tenant isolation from its frozen snapshot
+        cap = b.authorize(Principal("u", "t-a"), Intent("docs", Operation.READ))
+        predicates = cap.filter_constraints()
+        tenant_predicates = [p for p in predicates if p["field"] == "tenant_id"]
+        assert tenant_predicates, (
+            "Tenant isolation row rule must still be enforced after original policy was mutated"
+        )
+
+
+class TestTenantIsolationEnforcement:
+    """Phase 7: tenant isolation — missing row rule causes compilation failure."""
+
+    def test_tenant_scoped_resource_without_row_rule_rejected(self) -> None:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "tenant_data",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "value": FieldDefinition("value", "string"),
+            },
+            supported_operations=("read",),
+        ))
+        # Policy allows read but has NO tenant row rule — must fail compilation
+        pol = DataFencePolicy("p", "1", {"tenant_data": ResourcePolicy(
+            "tenant_data",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "value"],
+            row_rules=[],  # missing tenant isolation
+            max_rows=100,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ConfigurationError, match="tenant"):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    def test_non_tenant_resource_without_row_rule_allowed(self) -> None:
+        """A resource with no tenant key does not require a tenant row rule."""
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "global_config",
+            fields={"key": FieldDefinition("key", "string"),
+                    "value": FieldDefinition("value", "string")},
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("p", "1", {"global_config": ResourcePolicy(
+            "global_config",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["key", "value"],
+            row_rules=[],  # no tenant key → no tenant row rule required
+            max_rows=100,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        # Must NOT raise
+        b = DataFenceBoundary.create(engine, reg, token_bytes(32))
+        cap = b.authorize(Principal("u", "t"), Intent("global_config", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+
+class TestFilterAuthorization:
+    """Phase 8: only explicitly authorized fields may be used as filters."""
+
+    def test_unauthorized_filter_field_denied(self) -> None:
+        """Agent cannot filter on a field that is not in filterable_fields."""
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "products",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "name": FieldDefinition("name", "string"),
+                "cost": FieldDefinition("cost", "decimal"),
+            },
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("p", "1", {"products": ResourcePolicy(
+            "products",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "name", "cost"],
+            filterable_fields=["id", "tenant_id"],  # cost and name not filterable
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=50,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(engine, reg, key)
+
+        # Filtering on authorized field → OK
+        b.authorize(
+            Principal("u", "t-a"),
+            Intent("products", Operation.READ, filters={"id": 1}),
+        )
+
+        # Filtering on cost (not filterable) → DENIED
+        with pytest.raises(PolicyDeniedError):
+            b.authorize(
+                Principal("u", "t-a"),
+                Intent("products", Operation.READ, filters={"cost": 100}),
+            )
+
+    def test_policy_injected_filter_cannot_be_overridden(self) -> None:
+        """Policy-injected tenant filter always overrides agent-supplied tenant filter."""
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, filters={"tenant_id": "evil-tenant"}),
+        )
+        tenant_preds = [c for c in cap.filter_constraints() if c["field"] == "tenant_id"]
+        assert any(c["value"] == "tenant-a" for c in tenant_preds)
+        assert not any(c["value"] == "evil-tenant" for c in tenant_preds)
+
+
+class TestDataClassificationSemantics:
+    """Phase 9: RESTRICTED fields are auto-denied even if listed in allowed_fields."""
+
+    def test_restricted_field_auto_denied_even_if_in_allowed(self) -> None:
+        from datafence import DataClassification
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "sensitive",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "secret": FieldDefinition(
+                    "secret", "string",
+                    classification=DataClassification.RESTRICTED,
+                ),
+            },
+            supported_operations=("read",),
+        ))
+        # Policy explicitly lists "secret" in allowed_fields — should be overridden
+        pol = DataFencePolicy("p", "1", {"sensitive": ResourcePolicy(
+            "sensitive",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "secret"],  # RESTRICTED field listed!
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(engine, reg, key)
+
+        cap = b.authorize(Principal("u", "t-a"), Intent("sensitive", Operation.READ))
+        # RESTRICTED field must never appear in selected_fields
+        assert "secret" not in cap.selected_fields
+
+    def test_restricted_field_cannot_be_requested(self) -> None:
+        """Explicitly requesting a RESTRICTED field must be denied."""
+        boundary, _, _ = _make_boundary()
+        with pytest.raises(PolicyDeniedError):
+            boundary.authorize(
+                Principal("user:1", "tenant-a"),
+                Intent("customers", Operation.READ, fields=["id", "ssn"]),
             )

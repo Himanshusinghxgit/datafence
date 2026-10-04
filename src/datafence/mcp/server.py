@@ -1,72 +1,37 @@
 """
 DataFence MCP Server.
 
-Wraps DataFenceBoundary as a Model Context Protocol server that can be
-registered with any MCP-compatible agent framework.
+Framework-agnostic MCP request handler.  Resolves the Principal from the
+transport-layer session context (never from agent JSON) and returns a
+portable CapabilityToken in the tool response.
 
 Architecture::
 
-    [AI Agent / Claude / GPT-4]
-            │  MCP JSON-RPC call (untrusted arguments)
-            ▼
-    DataFenceMCPServer
-            │  resolves principal from authenticated session context
-            │  calls DataFenceQueryTool.call(principal, params)
-            ▼
+    [AI Agent]
+        │  MCP JSON-RPC call (untrusted arguments)
+        ▼
+    DataFenceMCPServer.handle_call_tool(tool_name, arguments, session_context)
+        │  session_context comes from the transport layer — never from arguments
+        │  principal_resolver(session_context) → Principal (required)
+        ▼
+    DataFenceQueryTool.call(principal, params)
+        ▼
     DataFenceBoundary.authorize(principal, intent)
-            │  Registry validation → Policy evaluation → Capability issuance
-            ▼
-    AuthorizedExecution (HMAC-signed) → returned to caller
-            │
-            ▼  (caller passes to their connector — DataFence does not execute)
-    Customer-owned connector
-            │
-            ▼
-    Enterprise data
+        ▼
+    CapabilityToken  (signed, portable) → returned in MCP response
+        │
+        ▼  caller passes token to their connector
+    Customer-owned connector → enterprise data
 
-The MCP server is responsible for:
-    1. Authenticating the session (who is calling).
-    2. Mapping session identity → Principal (never from the agent's JSON).
-    3. Routing tool calls to the correct DataFenceQueryTool.
+Security notes
+--------------
+``principal_resolver`` is REQUIRED.  Omitting it raises ``TypeError`` at
+construction time.
 
-DataFence is responsible for:
-    1. Authorizing what the principal may do.
-    2. Generating signed AuthorizedExecution capabilities.
-    3. Enforcing row/field policy.
-
-DataFence does NOT execute database operations.
-
-Security note on principal resolution
---------------------------------------
-The principal MUST be resolved from transport-level authentication context
-(e.g. a session token verified by the application), NOT from the agent's
-tool call arguments.  The agent must never be able to choose its own identity.
-
-``principal_resolver`` is REQUIRED.  There is no fallback.  A server without
-a configured resolver raises ``TypeError`` at construction time, making the
-misconfiguration impossible to miss.
-
-Usage::
-
-    from datafence.mcp.server import DataFenceMCPServer
-    from datafence.core.boundary import DataFenceBoundary
-    from datafence.core.principal import Principal
-
-    def my_auth_resolver(session_context: dict) -> Principal:
-        token = session_context["token"]
-        user = verify_token(token)   # application-owned
-        return Principal(id=user.id, tenant_id=user.tenant_id)
-
-    boundary = DataFenceBoundary.create(
-        policy_engine=engine,
-        registry=registry,
-        signing_key=signing_key,
-    )
-    server = DataFenceMCPServer(
-        boundary=boundary,
-        server_name="my-datafence",
-        principal_resolver=my_auth_resolver,
-    )
+The agent's JSON arguments are NEVER used as identity.  The ``_session``
+field sometimes embedded in MCP requests is intentionally ignored by
+``handle_request()``.  Transport adapters must inject authenticated context
+via ``session_context`` in their own ``handle_call_tool()`` calls.
 """
 
 from __future__ import annotations
@@ -85,11 +50,7 @@ logger = logging.getLogger(__name__)
 
 class DataFenceMCPServer:
     """
-    MCP server exposing one or more DataFence query tools.
-
-    This class is framework-agnostic.  It implements the core dispatch
-    logic (list_tools / call_tool) and can be adapted to any transport
-    (HTTP, stdio, WebSocket) by wrapping the ``handle_request`` method.
+    MCP server exposing DataFence query tools.
 
     Parameters
     ----------
@@ -100,21 +61,15 @@ class DataFenceMCPServer:
     version : str
         Server version string.
     principal_resolver : Callable[[dict], Principal]
-        **Required** callable that maps an authenticated session context dict
-        to a :class:`~datafence.core.principal.Principal`.
-
-        The context dict is supplied by the transport layer (e.g. extracted
-        from a verified JWT, session cookie, or mutual-TLS certificate).
-        It must NEVER come from the agent's tool call arguments.
-
-        Raises ``TypeError`` at construction time if not provided.
+        **Required** callable mapping authenticated session context → Principal.
+        Raises ``TypeError`` at construction if omitted.
     """
 
     def __init__(
         self,
         boundary: DataFenceBoundary,
         server_name: str = "datafence",
-        version: str = "1.0.0",
+        version: str = "0.1.0",
         principal_resolver: Callable[[dict], Principal] | None = None,
     ) -> None:
         if principal_resolver is None:
@@ -129,7 +84,9 @@ class DataFenceMCPServer:
         self._principal_resolver: Callable[[dict], Principal] = principal_resolver
 
         self._query_tool = DataFenceQueryTool(boundary=boundary)
-        self._tools: dict[str, DataFenceQueryTool] = {self._query_tool.tool_name: self._query_tool}
+        self._tools: dict[str, DataFenceQueryTool] = {
+            self._query_tool.tool_name: self._query_tool
+        }
 
     def register_tool(self, tool: DataFenceQueryTool) -> None:
         """Register an additional DataFenceQueryTool under its tool_name."""
@@ -163,19 +120,19 @@ class DataFenceMCPServer:
         Args:
             tool_name       : Name of the tool to invoke.
             arguments       : Tool arguments from the agent (untrusted Intent).
-            session_context : Authenticated session metadata from the transport
-                              layer, used to resolve the Principal.
+            session_context : Authenticated session metadata from the transport layer.
                               This must NEVER come from agent-controlled JSON.
 
         Returns:
-            MCP-compatible response dict containing the authorization result.
-            An allowed response exposes the signed capability metadata only —
-            no database rows are returned here.
+            MCP-compatible response dict.  On success, ``content[0]["text"]``
+            contains a JSON object with ``status``, ``token`` (the portable
+            CapabilityToken), ``capability`` metadata, and ``request_id``.
+            DataFence does NOT return database rows.
         """
         if tool_name not in self._tools:
             return self._error_response(f"Unknown tool: {tool_name!r}")
 
-        # Principal must come from authenticated transport context, not arguments.
+        # Principal MUST come from authenticated transport context, not arguments.
         try:
             principal = self._resolve_principal(session_context or {})
         except Exception as exc:
@@ -193,9 +150,9 @@ class DataFenceMCPServer:
                         "text": json.dumps(
                             {
                                 "status": "authorized",
+                                "token": result.token,
                                 "capability": result.capability,
                                 "request_id": result.request_id,
-                                "evidence_id": result.evidence_id,
                             }
                         ),
                     }
@@ -222,12 +179,9 @@ class DataFenceMCPServer:
         """
         Dispatch a raw MCP JSON-RPC request dict.
 
-        This is the main entry point for transport adapters.
-
-        Security note: The ``_session`` field sometimes present in MCP JSON
-        is agent-controlled and is intentionally ignored.  Transport adapters
-        must supply authenticated context via a separate, trusted channel and
-        call ``handle_call_tool`` directly with that context.
+        Security: the agent-provided ``_session`` field in ``params`` is
+        intentionally NOT forwarded to ``handle_call_tool``.  Transport
+        adapters must supply authenticated context via a separate channel.
         """
         method = request.get("method", "")
         params = request.get("params", {})
@@ -237,11 +191,10 @@ class DataFenceMCPServer:
         elif method == "tools/list":
             result = self.handle_list_tools()
         elif method == "tools/call":
-            # Agent-provided _session field is not forwarded.
-            # Transport must inject authenticated session_context separately.
             result = self.handle_call_tool(
                 tool_name=params.get("name", ""),
                 arguments=params.get("arguments", {}),
+                # _session field from agent JSON is intentionally not forwarded.
                 session_context=None,
             )
         else:
@@ -258,16 +211,12 @@ class DataFenceMCPServer:
     # ------------------------------------------------------------------
 
     def _resolve_principal(self, session_context: dict) -> Principal:
-        """
-        Resolve the authenticated Principal from transport session context.
-
-        Validates that the resolver returns a proper Principal instance.
-        Raises TypeError if an incompatible type is returned.
-        """
+        """Resolve the authenticated Principal from transport session context."""
         principal = self._principal_resolver(session_context)
         if not isinstance(principal, Principal):
             raise TypeError(
-                f"principal_resolver must return Principal, got {type(principal).__name__!r}"
+                f"principal_resolver must return Principal, "
+                f"got {type(principal).__name__!r}"
             )
         return principal
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from secrets import token_bytes
 
-from datafence import Actor, CapabilityVerifier, DataFenceBoundary, Intent, Operation
+from datafence import CapabilityVerifier, DataFenceBoundary, Intent, Operation, Principal
 from datafence.errors import PolicyDeniedError
 from examples.basic.connector import create_example_connector
 from examples.basic.policy import create_policy
@@ -59,7 +59,7 @@ def main() -> None:
     # ── Scenario 1: authorized read ──────────────────────────────────
     separator("1. Authorized read — ACME tenant reads their orders")
 
-    principal = Actor(id="user:alice", tenant_id="acme")
+    principal = Principal(id="user:alice", tenant_id="acme")
     intent = Intent(
         resource="orders",
         operation=Operation.READ,

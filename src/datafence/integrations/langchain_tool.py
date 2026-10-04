@@ -1,51 +1,25 @@
 """
 DataFence LangChain tool adapter.
 
-Wraps a DataFenceBoundary as a LangChain BaseTool so it can be used inside
-LangChain agents, chains, and tool executors.
-
-Architecture::
-
-    LangChain Agent
-        │  tool.run('{"resource": "orders", "fields": [...]}')
-        ▼
-    DataFenceLangChainTool._run(query_str)
-        │  parses JSON → Intent (untrusted)
-        ▼
-    DataFenceBoundary.authorize(principal, intent)
-        │  Registry → Policy → AuthorizedExecution (signed)
-        ▼
-    JSON string describing the signed capability
-        │
-        ▼  (caller passes capability to their own connector)
-    Customer-owned connector → database
+Returns a portable CapabilityToken so the caller's connector can verify the
+authorization independently.  The adapter never executes queries.
 
 Security invariants:
-    - The LangChain agent controls the query string (untrusted Intent).
-    - The host application provides the principal at construction time.
+    - The Principal is bound at construction time — the agent cannot change it.
+    - The LangChain agent controls the query string (untrusted Intent only).
     - DataFence issues a signed capability; it does NOT execute the query.
-    - The customer's connector receives the capability and executes it.
+    - The CapabilityToken embeds the full HMAC signature for transport.
 
 Usage::
 
     from datafence.integrations.langchain_tool import DataFenceLangChainTool
-    from datafence.core.types import Actor
+    from datafence.core.principal import Principal
 
-    # boundary = DataFenceBoundary.create(policy_engine=..., registry=..., signing_key=...)
-    principal = Actor(id="user:alice", tenant_id="acme")
+    principal = Principal(id="user:alice", tenant_id="acme")
     tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
 
-    # Use directly:
     result_json = tool.run('{"resource": "orders", "fields": ["id", "total"], "limit": 5}')
-
-    # Or add to a LangChain agent:
-    from langchain.agents import initialize_agent, AgentType
-    agent = initialize_agent(tools=[tool.as_langchain_tool()], llm=llm,
-                             agent=AgentType.OPENAI_FUNCTIONS)
-    agent.run("Show me my recent orders")
-
-Note: LangChain is an optional dependency.
-    pip install 'datafence[integrations]'
+    # result_json["token"] — pass to connector.
 """
 
 from __future__ import annotations
@@ -54,7 +28,8 @@ import json
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.principal import Principal as Actor
+from datafence.core.capability import CapabilityToken
+from datafence.core.principal import Principal
 from datafence.core.types import Intent, Operation
 from datafence.errors import DataFenceError
 
@@ -63,24 +38,22 @@ class DataFenceLangChainTool:
     """
     LangChain-compatible tool wrapping DataFenceBoundary.
 
-    Inherits from LangChain BaseTool when available; otherwise provides a
-    compatible interface that works with agent frameworks that duck-type tools.
-
-    The principal is bound at construction time — the agent cannot change it.
+    The Principal is bound at construction time — the agent cannot change it.
     """
 
     name: str = "datafence_query"
     description: str = (
-        "Request data access through the DataFence authorization boundary. "
+        "Request read access to a data resource through the DataFence authorization boundary. "
         "Input must be a JSON string with 'resource' (required), and optionally "
         "'fields' (list), 'filters' (dict), and 'limit' (int). "
-        'Example: {"resource": "orders", "fields": ["id", "total"], "limit": 5}'
+        'Example: {"resource": "orders", "fields": ["id", "total"], "limit": 5}. '
+        "Returns a signed authorization token; does NOT return data rows."
     )
 
     def __init__(
         self,
         boundary: DataFenceBoundary,
-        principal: Actor,
+        principal: Principal,
         tool_name: str = "datafence_query",
     ) -> None:
         self.boundary = boundary
@@ -100,13 +73,13 @@ class DataFenceLangChainTool:
 
     def _run(self, query: str, **_: Any) -> str:
         """
-        Authorize a data access request and return a JSON capability.
+        Authorize a data access request and return a JSON capability token.
 
         Args:
             query : JSON string with resource, fields, filters, limit.
 
         Returns:
-            JSON string with the authorization result.
+            JSON string with the authorization result including the capability token.
         """
         try:
             args = json.loads(query) if isinstance(query, str) else query
@@ -126,15 +99,18 @@ class DataFenceLangChainTool:
         except DataFenceError as exc:
             return json.dumps({"status": "denied", "reasons": [str(exc)]})
 
+        token = CapabilityToken.encode(capability)
         return json.dumps(
             {
                 "status": "authorized",
+                "token": token,
                 "execution_id": capability.execution_id,
                 "resource": capability.resource,
                 "operation": capability.operation.value,
-                "fields": capability.selected_fields,
+                "fields": list(capability.selected_fields),
                 "predicates": capability.filter_constraints(),
                 "limit": capability.limit,
+                "obligations": dict(capability.obligations or {}),
             }
         )
 

@@ -1,4 +1,21 @@
-# ConfigMap for DataFence policy
+# ConfigMap for a DataFence authorization policy.
+# Mount this into the application container and load it via YAMLPolicyLoader.
+#
+# Policy YAML syntax reference:
+#   resources.<name>.actions.read: allow | deny
+#   resources.<name>.fields.allow: [field, ...]
+#   resources.<name>.fields.deny:  [field, ...]
+#   resources.<name>.fields.filterable: [field, ...]   # explicit filter authorization
+#   resources.<name>.rows:
+#     - field: tenant_id
+#       operator: equals
+#       value: ":actor_tenant_id"           # resolved from Principal at request time
+#   resources.<name>.limits.rows: N
+#   resources.<name>.obligations:
+#     audit: true
+#
+# Note: Row rule values use :actor_tenant_id (not {{ actor.tenant_id }}).
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,32 +25,38 @@ metadata:
     app: datafence
 data:
   policy.yaml: |
-    version: "1"
-    policy:
-      name: production-policy
-      description: Production DataFence policy
-      
-      resources:
-        transactions:
-          operations:
-            allow: [read]
-            deny: [insert, update, delete]
-          
-          fields:
-            allow:
-              - id
-              - customer_id
-              - amount
-              - merchant
-              - timestamp
-            deny:
-              - card_number
-              - cvv
-              - account_number
-          
-          row_filters:
-            tenant_id: "{{ actor.tenant_id }}"
-          
-          limits:
-            max_rows: 1000
-            max_date_range_days: 90
+    name: production-policy
+    version: "1.0"
+
+    resources:
+      transactions:
+        actions:
+          read: allow
+
+        fields:
+          allow:
+            - id
+            - tenant_id
+            - customer_id
+            - amount
+            - merchant
+            - timestamp
+          deny:
+            - card_number
+            - cvv
+            - account_number
+          filterable:
+            - tenant_id
+            - merchant
+            - timestamp
+
+        rows:
+          - field: tenant_id
+            operator: equals
+            value: ":actor_tenant_id"
+
+        limits:
+          rows: 1000
+
+        obligations:
+          audit: true

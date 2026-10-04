@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from secrets import token_bytes
 
-from datafence import Actor, DataFenceBoundary, Intent, Operation
+from datafence import DataFenceBoundary, Intent, Operation, Principal
 from datafence.errors import PolicyDeniedError
 from examples.bank.policy import create_bank_policy
 from examples.reference_connector.memory import InMemoryReferenceConnector
@@ -65,7 +65,7 @@ def main() -> None:
 
     # Scenario 1: Authorized read
     separator("1. Authorized read — Bank A agent reads their transactions")
-    principal = Actor(id="agent:finance-assistant", tenant_id="bank_a")
+    principal = Principal(id="agent:finance-assistant", tenant_id="bank_a")
     authorized = fence.authorize(
         principal,
         Intent("transactions", Operation.READ, fields=["id", "merchant", "amount", "timestamp"]),

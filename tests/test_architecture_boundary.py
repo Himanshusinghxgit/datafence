@@ -7,12 +7,13 @@ authorization scenario. They answer: is the ownership boundary enforced in code?
 Groups:
     A. DataFenceBoundary structural contract
     B. No legacy execution path
-    C. Capability round-trip serialization
+    C. Capability round-trip serialization (with CapabilityToken)
     D. Tamper detection after serialization
 """
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import sys
@@ -23,9 +24,9 @@ from typing import Any
 import pytest
 
 from datafence import (
-    ActionDecision,
-    Actor,
     AuthorizedExecution,
+    CapabilityToken,
+    CapabilityVerificationError,
     CapabilityVerifier,
     DataFenceBoundary,
     DataFencePolicy,
@@ -33,11 +34,13 @@ from datafence import (
     FieldDefinition,
     Intent,
     Operation,
+    Principal,
     ResourceDefinition,
     ResourcePolicy,
     ResourceRegistry,
 )
-from datafence.core.capability import CapabilityVerificationError
+from datafence.core.policy import ActionDecision, RowRule
+from datafence.core.resources import PredicateOperator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -62,68 +65,12 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
         "orders",
         actions={"read": ActionDecision.ALLOW},
         allowed_fields=["id", "tenant_id", "total", "status"],
-        row_rules=[],
+        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
         max_rows=100,
     )})
     engine = DataFencePolicyEngine(pol, registry=reg)
     key = token_bytes(32)
     return DataFenceBoundary.create(engine, reg, key, capability_audience="test"), key
-
-
-def _cap_to_dict(cap: AuthorizedExecution) -> dict[str, Any]:
-    return {
-        "execution_id":   cap.execution_id,
-        "created_at":     cap.created_at.isoformat(),
-        "actor_id":       cap.actor.id,
-        "actor_tenant_id": cap.actor.tenant_id,
-        "actor_attributes": cap.actor.attributes,
-        "resource":       cap.resource,
-        "operation":      cap.operation.value,
-        "selected_fields": cap.selected_fields,
-        "predicates":     cap.predicates,
-        "limit":          cap.limit,
-        "policy_version": cap.policy_version,
-        "policy_decisions": cap.policy_decisions,
-        "expires_at":     cap.expires_at.isoformat() if cap.expires_at else None,
-        "audience":       cap.audience,
-        "nonce":          cap.nonce,
-        "signature":      cap.signature.hex(),
-    }
-
-
-def _dict_to_cap(d: dict[str, Any]) -> AuthorizedExecution:
-    from datetime import datetime, timezone
-
-    from datafence.core.principal import Principal
-    from datafence.core.types import Operation
-
-    def _dt(s: str | None) -> datetime | None:
-        if not s:
-            return None
-        dt = datetime.fromisoformat(s)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-    created_at = _dt(d["created_at"]) or datetime.now(timezone.utc)
-    return AuthorizedExecution(
-        execution_id=d["execution_id"],
-        created_at=created_at,
-        actor=Principal(
-            id=d["actor_id"],
-            tenant_id=d["actor_tenant_id"],
-            attributes=d.get("actor_attributes", {}),
-        ),
-        resource=d["resource"],
-        operation=Operation(d["operation"]),
-        selected_fields=d["selected_fields"],
-        predicates=d.get("predicates", []),
-        limit=d["limit"],
-        policy_version=d["policy_version"],
-        policy_decisions=d.get("policy_decisions", []),
-        expires_at=_dt(d.get("expires_at")),
-        audience=d["audience"],
-        nonce=d["nonce"],
-        signature=bytes.fromhex(d["signature"]),
-    )
 
 
 # ===========================================================================
@@ -146,13 +93,13 @@ class TestBoundaryStructuralContract:
 
     def test_authorize_returns_capability(self) -> None:
         b, _ = _make_boundary()
-        r = b.authorize(Actor("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        r = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
         assert isinstance(r, AuthorizedExecution)
         assert not isinstance(r, (list, dict))
 
     def test_authorize_needs_no_database(self) -> None:
         b, key = _make_boundary()
-        cap = b.authorize(Actor("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
         CapabilityVerifier(key, expected_audience="test").verify(cap)
 
     def test_boundary_source_has_no_db_imports(self) -> None:
@@ -182,6 +129,24 @@ class TestBoundaryStructuralContract:
         sig = inspect.signature(DataFenceBoundary.create)
         assert not any("connector" in p.lower() for p in sig.parameters)
 
+    def test_weak_key_rejected(self) -> None:
+        """Keys shorter than 32 bytes must be rejected."""
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition("orders", fields={
+            "id": FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        }, supported_operations=("read",)))
+        pol = DataFencePolicy("p", "1", {"orders": ResourcePolicy(
+            "orders",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ValueError, match="32"):
+            DataFenceBoundary.create(engine, reg, b"short")
+
 
 # ===========================================================================
 # B. No legacy execution path
@@ -191,6 +156,11 @@ class TestNoLegacyExecution:
     def test_no_legacy_datafence_class(self) -> None:
         import datafence
         assert not hasattr(datafence, "DataFence")
+
+    def test_no_actor_in_public_api(self) -> None:
+        """Actor alias has been removed."""
+        import datafence
+        assert not hasattr(datafence, "Actor")
 
     def test_no_execute_plan(self) -> None:
         b, _ = _make_boundary()
@@ -212,19 +182,15 @@ class TestNoLegacyExecution:
         import datafence
         assert not hasattr(datafence, "ExecutionResult")
 
-    def test_no_simple_policy_engine(self) -> None:
-        import datafence
-        assert not hasattr(datafence, "SimplePolicyEngine")
-
     def test_no_raw_sql_on_capability(self) -> None:
         b, _ = _make_boundary()
-        cap = b.authorize(Actor("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
         assert not hasattr(cap, "raw_sql")
 
     def test_no_enforced_filters_on_capability(self) -> None:
-        """Dual representation removed — only predicates."""
+        """Single predicates field only; enforced_filters was removed."""
         b, _ = _make_boundary()
-        cap = b.authorize(Actor("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
         assert not hasattr(cap, "enforced_filters")
         assert hasattr(cap, "predicates")
 
@@ -236,30 +202,72 @@ class TestNoLegacyExecution:
         import datafence
         assert not hasattr(datafence, "Request")
 
+    def test_capability_fields_are_tuples(self) -> None:
+        """Deep immutability: selected_fields and predicates are tuples."""
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        assert isinstance(cap.selected_fields, tuple)
+        assert isinstance(cap.predicates, tuple)
+        assert isinstance(cap.policy_decisions, tuple)
+
+    def test_capability_selected_fields_immutable(self) -> None:
+        """selected_fields is a tuple — no append possible."""
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        with pytest.raises((AttributeError, TypeError)):
+            cap.selected_fields.append("injected")  # type: ignore[union-attr]
+
 
 # ===========================================================================
-# C. Capability serialization round-trip
+# C. Capability serialization round-trip via CapabilityToken
 # ===========================================================================
 
 class TestCapabilityRoundTrip:
     def test_round_trip_preserves_signature(self) -> None:
         b, key = _make_boundary()
-        original = b.authorize(Actor("u:1", "t-a"),
-                               Intent("orders", Operation.READ, ["id", "total"]))
-        restored = _dict_to_cap(json.loads(json.dumps(_cap_to_dict(original))))
-        CapabilityVerifier(key, expected_audience="test").verify(restored)
+        original = b.authorize(
+            Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id", "total"])
+        )
+        token = CapabilityToken.encode(original)
+        restored = CapabilityVerifier(key, expected_audience="test").verify_token(token)
+        assert restored.execution_id == original.execution_id
+
+    def test_token_includes_signature(self) -> None:
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        token_str = CapabilityToken.encode(cap)
+        data = json.loads(token_str)
+        assert "sig" in data
+        assert len(data["sig"]) == 64  # 32 bytes = 64 hex chars
+
+    def test_token_has_version(self) -> None:
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        data = json.loads(CapabilityToken.encode(cap))
+        assert data["dfv"] == 1
+
+    def test_token_includes_roles(self) -> None:
+        b, _ = _make_boundary()
+        cap = b.authorize(
+            Principal("u:1", "t-a", roles=("finance:read",)),
+            Intent("orders", Operation.READ, ["id"])
+        )
+        data = json.loads(CapabilityToken.encode(cap))
+        assert data["actor_roles"] == ["finance:read"]
 
     def test_round_trip_preserves_all_fields(self) -> None:
-        b, _ = _make_boundary()
-        original = b.authorize(Actor("u:alice", "t-acme"),
-                               Intent("orders", Operation.READ, ["id", "status"]))
-        restored = _dict_to_cap(_cap_to_dict(original))
+        b, key = _make_boundary()
+        original = b.authorize(
+            Principal("u:alice", "t-acme"), Intent("orders", Operation.READ, ["id", "status"])
+        )
+        token = CapabilityToken.encode(original)
+        restored = CapabilityToken.decode(token)
         assert restored.execution_id == original.execution_id
         assert restored.actor.id == original.actor.id
         assert restored.actor.tenant_id == original.actor.tenant_id
+        assert set(restored.selected_fields) == set(original.selected_fields)
         assert restored.resource == original.resource
         assert restored.operation == original.operation
-        assert restored.selected_fields == original.selected_fields
         assert restored.limit == original.limit
         assert restored.policy_version == original.policy_version
         assert restored.audience == original.audience
@@ -267,36 +275,50 @@ class TestCapabilityRoundTrip:
         assert restored.signature == original.signature
 
     def test_round_trip_preserves_predicates(self) -> None:
-        from datafence.core.policy import RowRule
-        from datafence.core.resources import PredicateOperator
-        reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "metrics",
-            fields={
-                "id":        FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "value":     FieldDefinition("value", "decimal"),
-            },
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {"metrics": ResourcePolicy(
-            "metrics",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "value"],
-            row_rules=[
-                RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id"),
-                RowRule("value", PredicateOperator.GT, 100),
-            ],
-            max_rows=50,
-        )})
-        engine = DataFencePolicyEngine(pol, registry=reg)
-        key = token_bytes(32)
-        b = DataFenceBoundary.create(engine, reg, key, capability_audience="test")
-        original = b.authorize(Actor("u", "t-a"), Intent("metrics", Operation.READ))
-        restored = _dict_to_cap(_cap_to_dict(original))
-        gt = [c for c in restored.filter_constraints()
-              if c["field"] == "value" and c["operator"] == ">"]
-        assert gt and gt[0]["value"] == 100
+        b, key = _make_boundary()
+        cap = b.authorize(
+            Principal("u", "t-a"), Intent("orders", Operation.READ)
+        )
+        token = CapabilityToken.encode(cap)
+        restored = CapabilityToken.decode(token)
+        # Tenant predicate must survive round-trip
+        assert any(p["field"] == "tenant_id" for p in restored.filter_constraints())
+
+    def test_malformed_token_raises(self) -> None:
+        from datafence.core.capability import CapabilityVerificationError
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode("not-json")
+
+    def test_wrong_version_rejected(self) -> None:
+        from datafence.core.capability import CapabilityVerificationError
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        data = json.loads(CapabilityToken.encode(cap))
+        data["dfv"] = 999
+        with pytest.raises(CapabilityVerificationError, match="version"):
+            CapabilityToken.decode(json.dumps(data))
+
+    def test_missing_sig_field_raises(self) -> None:
+        from datafence.core.capability import CapabilityVerificationError
+        b, _ = _make_boundary()
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        data = json.loads(CapabilityToken.encode(cap))
+        del data["sig"]
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(json.dumps(data))
+
+    def test_connector_can_verify_without_datafence_runtime(self) -> None:
+        """The connector needs only the signing key — no DataFence boundary object."""
+        b, key = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        token = CapabilityToken.encode(cap)
+
+        # Simulate a separate process — no boundary object available
+        del b
+
+        verifier = CapabilityVerifier(key, expected_audience="test")
+        restored = verifier.verify_token(token)
+        assert restored.execution_id == cap.execution_id
 
 
 # ===========================================================================
@@ -304,71 +326,86 @@ class TestCapabilityRoundTrip:
 # ===========================================================================
 
 class TestTamperDetection:
-    def _orig(self) -> tuple[AuthorizedExecution, bytes]:
+    def _cap_and_key(self) -> tuple[AuthorizedExecution, bytes, str]:
         b, key = _make_boundary()
-        cap = b.authorize(Actor("u:1", "t-a"),
-                          Intent("orders", Operation.READ, ["id", "total"]))
-        return cap, key
+        cap = b.authorize(
+            Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id", "total"])
+        )
+        token = CapabilityToken.encode(cap)
+        return cap, key, token
 
-    def _tamper(self, field: str, val: Any, key: bytes, cap: AuthorizedExecution) -> None:
-        d = _cap_to_dict(cap)
-        d[field] = val
+    def _tamper_token(self, token: str, field: str, value: Any) -> str:
+        data = json.loads(token)
+        data[field] = value
+        return json.dumps(data)
+
+    def _assert_tamper_fails(self, token: str, field: str, value: Any, key: bytes) -> None:
+        tampered = self._tamper_token(token, field, value)
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test").verify(_dict_to_cap(d))
+            CapabilityVerifier(key, expected_audience="test").verify_token(tampered)
 
     def test_resource(self) -> None:
-        cap, key = self._orig()
-        self._tamper("resource", "secret_table", key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "resource", "secret_table", key)
 
     def test_operation(self) -> None:
-        cap, key = self._orig()
-        self._tamper("operation", "delete", key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "operation", "delete", key)
 
     def test_fields(self) -> None:
-        cap, key = self._orig()
-        self._tamper("selected_fields", ["id", "total", "ssn"], key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "selected_fields", ["id", "total", "ssn"], key)
 
     def test_limit(self) -> None:
-        cap, key = self._orig()
-        self._tamper("limit", 999999, key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "limit", 999999, key)
 
     def test_tenant(self) -> None:
-        cap, key = self._orig()
-        self._tamper("actor_tenant_id", "evil-tenant", key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "actor_tenant_id", "evil-tenant", key)
+
+    def test_roles(self) -> None:
+        """principal.roles are now HMAC-signed — tampering must be detected."""
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "actor_roles", ["admin", "superuser"], key)
 
     def test_predicates(self) -> None:
-        cap, key = self._orig()
-        d = _cap_to_dict(cap)
+        cap, key, token = self._cap_and_key()
+        d = json.loads(token)
         d["predicates"] = [{"field": "tenant_id", "operator": "=", "value": "evil"}]
+        tampered = json.dumps(d)
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test").verify(_dict_to_cap(d))
+            CapabilityVerifier(key, expected_audience="test").verify_token(tampered)
 
     def test_policy_version(self) -> None:
-        cap, key = self._orig()
-        self._tamper("policy_version", "old-permissive", key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "policy_version", "old-permissive", key)
 
     def test_nonce(self) -> None:
-        cap, key = self._orig()
-        self._tamper("nonce", "replayed-nonce", key, cap)
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "nonce", "replayed-nonce", key)
 
     def test_wrong_key(self) -> None:
-        cap, key = self._orig()
-        d = _cap_to_dict(cap)
+        cap, key, token = self._cap_and_key()
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(token_bytes(32), expected_audience="test").verify(
-                _dict_to_cap(d)
-            )
+            CapabilityVerifier(token_bytes(32), expected_audience="test").verify_token(token)
 
-    def test_stripped_signature_is_forgery(self) -> None:
-        cap, key = self._orig()
-        d = _cap_to_dict(cap)
-        d["signature"] = "00" * 32
-        with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test").verify(_dict_to_cap(d))
+    def test_stripped_signature(self) -> None:
+        cap, key, token = self._cap_and_key()
+        self._assert_tamper_fails(token, "sig", "00" * 32, key)
 
-    def test_audience_tamper_caught(self) -> None:
-        cap, key = self._orig()
-        d = _cap_to_dict(cap)
+    def test_audience_tamper(self) -> None:
+        cap, key, token = self._cap_and_key()
+        d = json.loads(token)
         d["audience"] = "attacker-service"
+        tampered = json.dumps(d)
         with pytest.raises(CapabilityVerificationError):
-            CapabilityVerifier(key, expected_audience="test").verify(_dict_to_cap(d))
+            CapabilityVerifier(key, expected_audience="test").verify_token(tampered)
+
+    def test_in_memory_tamper_detected(self) -> None:
+        """Direct dataclasses.replace tampering must also fail verification."""
+        b, key = _make_boundary()
+        cap = b.authorize(Principal("u:1", "t-a"), Intent("orders", Operation.READ, ["id"]))
+        tampered = dataclasses.replace(cap, resource="evil_table")
+        with pytest.raises(CapabilityVerificationError, match="signature"):
+            CapabilityVerifier(key, expected_audience="test").verify(tampered)

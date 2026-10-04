@@ -1,432 +1,103 @@
 """
-Core DataFence benchmarks.
+DataFence v0.1 performance benchmarks.
 
-Measures performance of policy evaluation, execution, and security features.
+Measures the authorization boundary throughput — policy evaluation and
+capability issuance — without any database I/O.
+
+Run:
+    python -m benchmarks.benchmark_core
 """
 
+from __future__ import annotations
+
+import statistics
 import time
-from typing import Any
+from secrets import token_bytes
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector, SQLiteConnector
-from datafence.core.request import ExecutionRequest
-
-
-class BenchmarkResult:
-    """Benchmark result container."""
-
-    def __init__(self, name: str):
-        self.name = name
-        self.times: list[float] = []
-        self.errors: int = 0
-
-    def add_time(self, elapsed: float):
-        """Add timing measurement."""
-        self.times.append(elapsed)
-
-    def add_error(self):
-        """Record an error."""
-        self.errors += 1
-
-    @property
-    def avg(self) -> float:
-        """Average time in milliseconds."""
-        return (sum(self.times) / len(self.times)) * 1000 if self.times else 0
-
-    @property
-    def min(self) -> float:
-        """Minimum time in milliseconds."""
-        return min(self.times) * 1000 if self.times else 0
-
-    @property
-    def max(self) -> float:
-        """Maximum time in milliseconds."""
-        return max(self.times) * 1000 if self.times else 0
-
-    @property
-    def p50(self) -> float:
-        """50th percentile (median) in milliseconds."""
-        if not self.times:
-            return 0
-        sorted_times = sorted(self.times)
-        return sorted_times[len(sorted_times) // 2] * 1000
-
-    @property
-    def p95(self) -> float:
-        """95th percentile in milliseconds."""
-        if not self.times:
-            return 0
-        sorted_times = sorted(self.times)
-        idx = int(len(sorted_times) * 0.95)
-        return sorted_times[idx] * 1000
-
-    @property
-    def p99(self) -> float:
-        """99th percentile in milliseconds."""
-        if not self.times:
-            return 0
-        sorted_times = sorted(self.times)
-        idx = int(len(sorted_times) * 0.99)
-        return sorted_times[idx] * 1000
-
-    def print_summary(self):
-        """Print benchmark summary."""
-        print(f"\n{self.name}")
-        print("=" * 60)
-        print(f"  Iterations: {len(self.times)}")
-        print(f"  Errors: {self.errors}")
-        print(f"  Average: {self.avg:.2f}ms")
-        print(f"  Median (p50): {self.p50:.2f}ms")
-        print(f"  p95: {self.p95:.2f}ms")
-        print(f"  p99: {self.p99:.2f}ms")
-        print(f"  Min: {self.min:.2f}ms")
-        print(f"  Max: {self.max:.2f}ms")
+from datafence import (
+    ActionDecision,
+    DataFenceBoundary,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Intent,
+    Operation,
+    Principal,
+    ResourceDefinition,
+    ResourcePolicy,
+    ResourceRegistry,
+    RowRule,
+)
+from datafence.core.capability import CapabilityToken
+from datafence.core.resources import PredicateOperator
 
 
-def benchmark_policy_evaluation(iterations: int = 1000) -> BenchmarkResult:
-    """
-    Benchmark policy evaluation performance.
+def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
+    registry = ResourceRegistry()
+    registry.register(ResourceDefinition(
+        "orders",
+        fields={
+            "id":        FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            "total":     FieldDefinition("total", "decimal"),
+            "status":    FieldDefinition("status", "string"),
+            "merchant":  FieldDefinition("merchant", "string"),
+        },
+        supported_operations=("read",),
+    ))
+    policy = DataFencePolicy("bench", "1.0", {"orders": ResourcePolicy(
+        "orders",
+        actions={"read": ActionDecision.ALLOW},
+        allowed_fields=["id", "tenant_id", "total", "status", "merchant"],
+        filterable_fields=["id", "tenant_id", "status"],
+        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+        max_rows=100,
+    )})
+    engine = DataFencePolicyEngine(policy, registry=registry)
+    key = token_bytes(32)
+    return DataFenceBoundary.create(engine, registry, key, capability_audience="bench"), key
 
-    Args:
-        iterations: Number of iterations
 
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult("Policy Evaluation")
-
-    # Setup
-    data = {
-        "users": [{"id": i, "tenant_id": "acme", "name": f"User{i}"} for i in range(100)]
-    }
-
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id", "name"],
-        "filters": {"tenant_id": "acme"},
-        "limit": 10,
-    }
-
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
+def bench(name: str, fn: "callable", iterations: int = 1000) -> None:
+    times = []
     for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
+        t0 = time.perf_counter()
+        fn()
+        times.append(time.perf_counter() - t0)
 
-    return result
+    mean_ms = statistics.mean(times) * 1000
+    p99_ms = sorted(times)[int(0.99 * len(times))] * 1000
+    print(f"  {name:<45} mean={mean_ms:.3f}ms  p99={p99_ms:.3f}ms  n={iterations}")
 
 
-def benchmark_sql_firewall(iterations: int = 1000) -> BenchmarkResult:
-    """
-    Benchmark SQL firewall performance.
+def main() -> None:
+    boundary, key = _make_boundary()
+    principal = Principal("user:alice", "tenant-acme")
+    intent = Intent("orders", Operation.READ, ["id", "total", "status"])
 
-    Args:
-        iterations: Number of iterations
+    print("DataFence v0.1 benchmarks")
+    print("=" * 70)
+    print()
 
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult("SQL Firewall")
+    # Authorize (registry + policy evaluation + HMAC signing)
+    bench("authorize()", lambda: boundary.authorize(principal, intent))
 
-    # Setup
-    data = {"users": [{"id": i, "tenant_id": "acme"} for i in range(100)]}
+    # Authorize + encode to CapabilityToken
+    def authorize_and_encode() -> None:
+        cap = boundary.authorize(principal, intent)
+        CapabilityToken.encode(cap)
 
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml(
-        "policies/basic.yaml", connector, enable_sql_firewall=True
-    )
+    bench("authorize() + CapabilityToken.encode()", authorize_and_encode)
 
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id"],
-        "limit": 10,
-    }
+    # Token decode + verify
+    cap = boundary.authorize(principal, intent)
+    token = CapabilityToken.encode(cap)
+    from datafence import CapabilityVerifier
+    verifier = CapabilityVerifier(key, expected_audience="bench")
+    bench("CapabilityVerifier.verify_token()", lambda: verifier.verify_token(token))
 
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
-    for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
-
-    return result
-
-
-def benchmark_pii_detection(iterations: int = 1000) -> BenchmarkResult:
-    """
-    Benchmark PII detection performance.
-
-    Args:
-        iterations: Number of iterations
-
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult("PII Detection")
-
-    # Setup - data with PII
-    data = {
-        "users": [
-            {
-                "id": i,
-                "tenant_id": "acme",
-                "email": f"user{i}@example.com",
-                "phone": "555-123-4567",
-            }
-            for i in range(100)
-        ]
-    }
-
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml(
-        "policies/basic.yaml", connector, enable_pii_detection=True
-    )
-
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id", "email", "phone"],
-        "limit": 10,
-    }
-
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
-    for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
-
-    return result
-
-
-def benchmark_memory_connector(iterations: int = 1000, rows: int = 100) -> BenchmarkResult:
-    """
-    Benchmark Memory connector performance.
-
-    Args:
-        iterations: Number of iterations
-        rows: Number of rows in data
-
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult(f"Memory Connector ({rows} rows)")
-
-    # Setup
-    data = {
-        "users": [{"id": i, "tenant_id": "acme", "name": f"User{i}"} for i in range(rows)]
-    }
-
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id", "name"],
-        "limit": 50,
-    }
-
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
-    for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
-
-    return result
-
-
-def benchmark_field_restriction(iterations: int = 1000) -> BenchmarkResult:
-    """
-    Benchmark field restriction performance.
-
-    Args:
-        iterations: Number of iterations
-
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult("Field Restriction")
-
-    # Setup
-    data = {
-        "users": [
-            {
-                "id": i,
-                "tenant_id": "acme",
-                "name": f"User{i}",
-                "email": f"user{i}@example.com",
-                "password": "secret",
-                "ssn": "123-45-6789",
-            }
-            for i in range(100)
-        ]
-    }
-
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id", "name", "email"],  # password and ssn denied
-        "limit": 10,
-    }
-
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
-    for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
-
-    return result
-
-
-def benchmark_full_stack(iterations: int = 1000) -> BenchmarkResult:
-    """
-    Benchmark full stack (all features enabled).
-
-    Args:
-        iterations: Number of iterations
-
-    Returns:
-        Benchmark result
-    """
-    result = BenchmarkResult("Full Stack (All Features)")
-
-    # Setup
-    data = {
-        "users": [
-            {
-                "id": i,
-                "tenant_id": "acme",
-                "email": f"user{i}@example.com",
-                "phone": "555-123-4567",
-            }
-            for i in range(100)
-        ]
-    }
-
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml(
-        "policies/basic.yaml",
-        connector,
-        enable_sql_firewall=True,
-        enable_pii_detection=True,
-    )
-
-    request_dict = {
-        "actor": {"id": "agent:test", "tenant_id": "acme"},
-        "operation": "read",
-        "resource": "users",
-        "fields": ["id", "email", "phone"],
-        "filters": {"tenant_id": "acme"},
-        "limit": 10,
-    }
-
-    # Warmup
-    for _ in range(10):
-        fence.execute(request_dict)
-
-    # Benchmark
-    for _ in range(iterations):
-        start = time.perf_counter()
-        try:
-            fence.execute(request_dict)
-            elapsed = time.perf_counter() - start
-            result.add_time(elapsed)
-        except Exception:
-            result.add_error()
-
-    return result
-
-
-def run_all_benchmarks(iterations: int = 1000):
-    """
-    Run all core benchmarks.
-
-    Args:
-        iterations: Number of iterations per benchmark
-    """
-    print("=" * 60)
-    print("DataFence Performance Benchmarks")
-    print("=" * 60)
-    print(f"Iterations per benchmark: {iterations}")
-
-    benchmarks = [
-        benchmark_policy_evaluation,
-        benchmark_sql_firewall,
-        benchmark_pii_detection,
-        benchmark_field_restriction,
-        lambda: benchmark_memory_connector(iterations, 100),
-        lambda: benchmark_memory_connector(iterations, 1000),
-        benchmark_full_stack,
-    ]
-
-    results = []
-    for benchmark_func in benchmarks:
-        result = benchmark_func(iterations) if callable(benchmark_func) else benchmark_func
-        result.print_summary()
-        results.append(result)
-
-    # Summary
-    print("\n" + "=" * 60)
-    print("Summary")
-    print("=" * 60)
-    for result in results:
-        print(f"{result.name:40} {result.avg:>8.2f}ms (p95: {result.p95:.2f}ms)")
+    print()
 
 
 if __name__ == "__main__":
-    import sys
-
-    iterations = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
-    run_all_benchmarks(iterations)
+    main()

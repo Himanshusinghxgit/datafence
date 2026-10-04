@@ -1,17 +1,17 @@
 """
-DataFence enhanced policy model (Phase 3).
+DataFence enhanced policy model.
 
-This module replaces both:
-  - the legacy policy/models.py (Pydantic-based Policy / ResourcePolicy)
-  - core/policy_engine.py (SimplePolicyEngine)
-
-Design goals (from the architectural analysis):
+Design goals:
   - Policy INJECTS mandatory constraints; it does NOT require the LLM to supply them.
   - One YAML policy file can define the complete authorization model for a resource.
   - PolicyDecision carries all information needed to build AuthorizedExecution.
   - Principal attributes can be referenced in row-filters (:actor_tenant_id, etc.).
+  - Filter authorization: only explicitly authorised fields may be used as filters.
+  - DataClassification: RESTRICTED fields are automatically denied by the policy engine.
+  - v1 is READ-only at the adapter layer; the Operation enum still supports future writes
+    but YAML policies should only expose "read" in the initial release.
 
-Policy evaluation flow:
+Policy evaluation flow::
 
     Principal + Intent
           ↓
@@ -21,24 +21,22 @@ Policy evaluation flow:
           ↓  (if ALLOW)
       AuthorizedExecution (via boundary)
 
-The YAML schema understood by YAMLPolicyLoader is:
+YAML schema understood by YAMLPolicyLoader::
 
     resources:
       transactions:
         actions:
           read: allow
-          insert: deny
-          update: deny
-          delete: deny
         fields:
           allow:
             - id
             - merchant
             - amount
-            - timestamp
           deny:
             - card_number
-            - account_number
+          filterable:           # NEW: explicit filter authorization
+            - merchant
+            - tenant_id
         rows:
           - field: tenant_id
             operator: equals
@@ -117,7 +115,10 @@ class ResourcePolicy:
     """
     Policy rules for a single resource.
 
-    This is the richer replacement for the old SimplePolicyEngine ResourcePolicy.
+    filterable_fields controls which fields the agent may use as filters.
+    If empty, the policy inherits allowed_fields as the filterable set.
+    Fields classified RESTRICTED in the registry are always denied regardless
+    of the filterable_fields list.
     """
 
     resource: str
@@ -129,18 +130,21 @@ class ResourcePolicy:
     allowed_fields: list[str] = field(default_factory=list)
     denied_fields: list[str] = field(default_factory=list)
 
+    # Filter authorization (Phase 8): fields the agent may use as intent filters.
+    # Empty means: inherit allowed_fields (minus denied_fields).
+    filterable_fields: list[str] = field(default_factory=list)
+
     # Row-level rules — policy INJECTS these, LLM cannot override
     row_rules: list[RowRule] = field(default_factory=list)
 
     # Limits
     max_rows: int = 100
 
-    # Obligations
+    # Obligations — carried forward into AuthorizedExecution metadata
     obligations: dict[str, Any] = field(default_factory=dict)
 
     def action_decision(self, action: str) -> ActionDecision:
-        """
-        Return the decision for *action*.
+        """Return the decision for *action*.
 
         Precedence: explicit deny > explicit allow > implicit deny.
         """
@@ -154,12 +158,10 @@ class ResourcePolicy:
         return Filter(predicates=tuple(r.to_predicate() for r in self.row_rules))
 
     def projection(self, requested: list[str] | None = None) -> Projection:
-        """
-        Return the Projection for a request.
+        """Return the Projection for a request.
 
         If *requested* is provided, intersect with allowed_fields and ensure
-        no denied field leaks through.  If *requested* is None, return all
-        allowed fields.
+        no denied field leaks through.
         """
         if requested:
             safe = [
@@ -169,12 +171,22 @@ class ResourcePolicy:
             safe = [f for f in self.allowed_fields if f not in self.denied_fields]
         return Projection.from_strings(safe)
 
+    def effective_filterable_fields(self) -> frozenset[str]:
+        """Return the effective set of fields the agent may filter on."""
+        if self.filterable_fields:
+            # Use explicit list, minus denied fields
+            return frozenset(
+                f for f in self.filterable_fields if f not in self.denied_fields
+            )
+        # Fall back to allowed_fields minus denied_fields
+        return frozenset(
+            f for f in self.allowed_fields if f not in self.denied_fields
+        )
+
 
 @dataclass
 class DataFencePolicy:
-    """
-    A complete policy document covering one or more resources.
-    """
+    """A complete policy document covering one or more resources."""
 
     name: str
     version: str
@@ -194,15 +206,7 @@ class PolicyDecision:
     """
     Result of evaluating a policy for one request.
 
-    effect:          ALLOW or DENY
-    reasons:         human-readable explanation (always present for DENY)
-    policy_name:     name of the policy that produced this decision
-    policy_version:  version string for audit provenance
-    allowed_fields:  (ALLOW only) fields the principal may access
-    enforced_filter: (ALLOW only) Filter the connector MUST apply
-    row_limit:       (ALLOW only) maximum rows to return
-    matched_rules:   list of rule identifiers that fired
-    obligations:     post-execution requirements (e.g. {"audit": True})
+    obligations is carried into AuthorizedExecution as audit metadata.
     """
 
     effect: PolicyEffect
@@ -269,11 +273,7 @@ class PolicyDecision:
 
 
 class PolicyEngine:
-    """
-    Protocol / base for policy engines.
-
-    Subclass this or use DataFencePolicyEngine.
-    """
+    """Protocol / base for policy engines."""
 
     def evaluate(self, principal: Any, intent: Any) -> PolicyDecision:
         raise NotImplementedError
@@ -289,28 +289,14 @@ class PolicyEngine:
 
 class DataFencePolicyEngine(PolicyEngine):
     """
-    Full policy engine for DataFence (Phase 3).
+    Full policy engine for DataFence.
 
-    Replaces SimplePolicyEngine with:
-    - Richer action rules (explicit allow/deny, implicit deny)
-    - Typed row filters (injected by policy, not required from LLM)
-    - Field allow/deny lists
-    - Obligations support
-    - Named policy versioning
-
-    Usage::
-
-        from datafence.core.policy import DataFencePolicyEngine, DataFencePolicy
-        from datafence.core.policy import YAMLPolicyLoader
-        from datafence.core.types import Intent, Operation
-        from datafence.core.registry import create_banking_registry
-
-        policy = YAMLPolicyLoader.load("policies/banking.yaml")
-        engine = DataFencePolicyEngine(policy, create_banking_registry())
-        decision = engine.evaluate(
-            principal,
-            Intent("transactions", Operation.READ, ["id", "merchant", "amount"]),
-        )
+    Phases implemented:
+    - Phase 8: Filter authorization — only explicitly filterable fields
+      (or allowed_fields if filterable_fields not set) may be used in intent
+      filters.  RESTRICTED fields are always denied as filters.
+    - Phase 9: DataClassification — RESTRICTED fields are automatically denied
+      in allowed_fields even if the policy lists them explicitly.
     """
 
     def __init__(self, policy: DataFencePolicy, registry: Any) -> None:
@@ -329,29 +315,24 @@ class DataFencePolicyEngine(PolicyEngine):
 
     @property
     def registry(self) -> Any:
-        """The immutable-at-construction schema registry used by this engine."""
+        """The registry used by this engine."""
         return self._registry
 
-    def evaluate(
-        self,
-        principal: Any,
-        intent: Any,
-    ) -> PolicyDecision:
-        """
-        Evaluate one untrusted intent for one trusted principal.
+    def evaluate(self, principal: Any, intent: Any) -> PolicyDecision:
+        """Evaluate one untrusted intent for one trusted principal."""
+        from datafence.core.registry import DataClassification
 
-        If a ResourceRegistry was provided at construction, validates fields
-        against the registry schema before checking policy rules.
-        """
         resource = intent.resource
         operation = intent.operation
-        requested_fields = intent.fields or []
+        requested_fields: list[str] = intent.fields or []
+        requested_filters: dict[str, Any] = dict(intent.filters) if intent.filters else {}
 
         # Normalise operation to lowercase string
         if hasattr(operation, "value"):
             action = operation.value.lower()
         else:
             action = str(operation).lower()
+
         rp = self._policy.resource_policy(resource)
         if rp is None:
             return PolicyDecision.deny(
@@ -360,13 +341,16 @@ class DataFencePolicyEngine(PolicyEngine):
                 policy_version=self._policy.version,
             )
 
-        # 0. Registry validation is mandatory and precedes authorization.
+        # 0. Registry validation
         if not self._registry.exists(resource):
             return PolicyDecision.deny(
                 reasons=[f"Resource {resource!r} is not registered"],
                 policy_name=self._policy.name,
                 policy_version=self._policy.version,
             )
+
+        res_def = self._registry.get(resource)
+
         if requested_fields:
             try:
                 self._registry.validate_fields(resource, requested_fields)
@@ -381,12 +365,12 @@ class DataFencePolicyEngine(PolicyEngine):
         action_decision = rp.action_decision(action)
         if action_decision == ActionDecision.DENY:
             return PolicyDecision.deny(
-                reasons=[f"Action {action!r} is denied on resource {resource!r}"],
+                reasons=[f"Operation {action!r} is denied on resource {resource!r}"],
                 policy_name=self._policy.name,
                 policy_version=self._policy.version,
             )
 
-        # 2. Field check (if specific fields requested)
+        # 2. Field check — deny if any requested field is in denied_fields
         if requested_fields:
             denied = [f for f in requested_fields if f in rp.denied_fields]
             if denied:
@@ -403,14 +387,58 @@ class DataFencePolicyEngine(PolicyEngine):
                     policy_version=self._policy.version,
                 )
 
-        # 3. Build projection
-        projection = rp.projection(requested_fields)
-        if not projection:
+        # Phase 9: Automatically strip RESTRICTED fields from allowed_fields
+        # even if the policy explicitly lists them.
+        effective_allowed = list(rp.allowed_fields)
+        if res_def is not None:
+            effective_allowed = [
+                f for f in effective_allowed
+                if res_def.fields.get(f) is None
+                or res_def.fields[f].classification != DataClassification.RESTRICTED
+            ]
+
+        # 3. Build projection (using classification-filtered allowed set)
+        if requested_fields:
+            safe = [
+                f for f in requested_fields
+                if f in effective_allowed and f not in rp.denied_fields
+            ]
+        else:
+            safe = [f for f in effective_allowed if f not in rp.denied_fields]
+
+        if not safe:
             return PolicyDecision.deny(
                 reasons=["No authorized fields available for this request"],
                 policy_name=self._policy.name,
                 policy_version=self._policy.version,
             )
+
+        projection = Projection.from_strings(safe)
+
+        # Phase 8: Filter authorization
+        # Agent-supplied intent filters must only use filterable fields.
+        if requested_filters:
+            filterable = rp.effective_filterable_fields()
+            for filter_field in requested_filters:
+                if filter_field not in filterable:
+                    return PolicyDecision.deny(
+                        reasons=[
+                            f"Field {filter_field!r} is not authorized for filtering on "
+                            f"resource {resource!r}. Filterable fields: "
+                            f"{sorted(filterable) or 'none'}"
+                        ],
+                        policy_name=self._policy.name,
+                        policy_version=self._policy.version,
+                    )
+                # Double-check RESTRICTED fields are never filterable
+                if res_def is not None:
+                    field_def = res_def.fields.get(filter_field)
+                    if field_def is not None and field_def.classification == DataClassification.RESTRICTED:
+                        return PolicyDecision.deny(
+                            reasons=[f"Filtering on RESTRICTED field {filter_field!r} is not permitted"],
+                            policy_name=self._policy.name,
+                            policy_version=self._policy.version,
+                        )
 
         # 4. Resolve enforced filter using principal attributes
         enforced_filter = rp.enforced_filter().resolve(principal)
@@ -462,28 +490,7 @@ class YAMLPolicyLoader:
     """
     Load a DataFencePolicy from a YAML file or dict.
 
-    Expected YAML structure::
-
-        name: banking-v1
-        version: "1.0"
-        resources:
-          transactions:
-            actions:
-              read: allow
-              insert: deny
-              update: deny
-              delete: deny
-            fields:
-              allow: [id, merchant, amount, timestamp]
-              deny: [card_number, account_number]
-            rows:
-              - field: tenant_id
-                operator: equals
-                value: ":actor_tenant_id"
-            limits:
-              rows: 100
-            obligations:
-              audit: true
+    Supports the ``filterable`` field key for explicit filter authorization.
     """
 
     @classmethod
@@ -523,9 +530,10 @@ class YAMLPolicyLoader:
         fields_data = data.get("fields") or {}
         allowed_fields: list[str] = fields_data.get("allow") or []
         denied_fields: list[str] = fields_data.get("deny") or []
+        filterable_fields: list[str] = fields_data.get("filterable") or []
 
         # Validate all field identifiers
-        for f in allowed_fields + denied_fields:
+        for f in allowed_fields + denied_fields + filterable_fields:
             validate_identifier(f, context="field name")
 
         # Row rules
@@ -558,6 +566,7 @@ class YAMLPolicyLoader:
             actions=actions,
             allowed_fields=allowed_fields,
             denied_fields=denied_fields,
+            filterable_fields=filterable_fields,
             row_rules=row_rules,
             max_rows=max_rows,
             obligations=obligations,

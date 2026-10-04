@@ -1,4 +1,14 @@
-# Kubernetes Deployment for DataFence API
+# Kubernetes Deployment for a DataFence authorization API.
+#
+# This manifest deploys the DataFence image.  Your application entrypoint
+# (supplied via CMD override or a ConfigMap-mounted script) must:
+#   1. Build DataFenceBoundary with a policy loaded from /app/policies/policy.yaml
+#   2. Supply a principal_resolver that validates Bearer tokens
+#   3. Call datafence.api.create_api(boundary, principal_resolver) and serve it
+#
+# DataFence does NOT own a database.  Remove or replace the DB env vars below
+# with whatever your application connector needs.
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -8,7 +18,7 @@ metadata:
     app: datafence
     component: api
 spec:
-  replicas: 3
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -23,113 +33,73 @@ spec:
       labels:
         app: datafence
         component: api
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
-        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: datafence
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
-      
+
       containers:
       - name: datafence-api
-        image: datafence/datafence-api:latest
+        image: datafence/datafence-api:0.1.0
         imagePullPolicy: Always
-        
+
         ports:
         - name: http
           containerPort: 8000
           protocol: TCP
-        
+
         env:
-        - name: DATAFENCE_POSTGRES_HOST
+        # Signing key must be supplied by the application — never hardcode it.
+        - name: DATAFENCE_SIGNING_KEY
           valueFrom:
             secretKeyRef:
-              name: datafence-db-credentials
-              key: host
-        - name: DATAFENCE_POSTGRES_PORT
-          value: "5432"
-        - name: DATAFENCE_POSTGRES_DATABASE
-          valueFrom:
-            secretKeyRef:
-              name: datafence-db-credentials
-              key: database
-        - name: DATAFENCE_POSTGRES_USER
-          valueFrom:
-            secretKeyRef:
-              name: datafence-db-credentials
-              key: username
-        - name: DATAFENCE_POSTGRES_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: datafence-db-credentials
-              key: password
-        - name: API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: datafence-api-keys
-              key: api-key
-        
+              name: datafence-signing-key
+              key: signing-key
+
         volumeMounts:
         - name: policy-config
-          mountPath: /app/policy.yaml
+          mountPath: /app/policies/policy.yaml
           subPath: policy.yaml
           readOnly: true
-        - name: logs
-          mountPath: /app/logs
-        
+
         resources:
           requests:
             cpu: 100m
-            memory: 256Mi
+            memory: 128Mi
           limits:
             cpu: 500m
-            memory: 512Mi
-        
+            memory: 256Mi
+
+        # The DataFence API exposes /health (not /healthz or /ready).
+        # Override these paths if your application layer adds /healthz and /ready.
         livenessProbe:
           httpGet:
-            path: /healthz
+            path: /health
             port: http
-          initialDelaySeconds: 30
+          initialDelaySeconds: 15
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
-        
+
         readinessProbe:
           httpGet:
-            path: /ready
+            path: /health
             port: http
-          initialDelaySeconds: 10
+          initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3
-        
+
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
           capabilities:
             drop:
             - ALL
-      
+
       volumes:
       - name: policy-config
         configMap:
           name: datafence-policy
-      - name: logs
-        emptyDir: {}
-      
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - datafence
-              topologyKey: kubernetes.io/hostname

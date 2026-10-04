@@ -1,199 +1,91 @@
 """
-Integration benchmarks.
+DataFence v0.1 integration adapter benchmarks.
 
-Measures performance overhead of framework integrations.
+Measures per-call overhead of the OpenAI, Anthropic, and LangChain adapters.
+No actual network calls are made — only the authorization boundary is exercised.
+
+Run:
+    python -m benchmarks.benchmark_integrations
 """
 
-import time
+from __future__ import annotations
+
 import json
-from unittest.mock import Mock
+import statistics
+import time
+from secrets import token_bytes
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
-from benchmarks.benchmark_core import BenchmarkResult
-
-
-def benchmark_openai_adapter(iterations: int = 1000) -> BenchmarkResult:
-    """Benchmark OpenAI adapter overhead."""
-    result = BenchmarkResult("OpenAI Adapter")
-
-    # Setup
-    data = {"users": [{"id": i, "tenant_id": "acme"} for i in range(100)]}
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    try:
-        from datafence.integrations.openai_adapter import OpenAIAdapter
-
-        adapter = OpenAIAdapter(fence)
-
-        # Get functions once (cached)
-        functions = adapter.get_functions()
-
-        function_call = {
-            "name": "read_users",
-            "arguments": json.dumps({"fields": ["id"], "limit": 10}),
-        }
-
-        actor = {"id": "test", "tenant_id": "acme"}
-
-        # Warmup
-        for _ in range(10):
-            adapter.execute_function_call(function_call, actor)
-
-        # Benchmark
-        for _ in range(iterations):
-            start = time.perf_counter()
-            try:
-                adapter.execute_function_call(function_call, actor)
-                elapsed = time.perf_counter() - start
-                result.add_time(elapsed)
-            except Exception:
-                result.add_error()
-
-    except ImportError:
-        print("⚠️  OpenAI integration not installed")
-
-    return result
+from datafence import (
+    ActionDecision,
+    DataFenceBoundary,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Principal,
+    ResourceDefinition,
+    ResourcePolicy,
+    ResourceRegistry,
+    RowRule,
+)
+from datafence.core.resources import PredicateOperator
+from datafence.integrations.openai_tool import DataFenceOpenAITool
+from datafence.integrations.anthropic_tool import DataFenceAnthropicTool
+from datafence.integrations.langchain_tool import DataFenceLangChainTool
 
 
-def benchmark_claude_adapter(iterations: int = 1000) -> BenchmarkResult:
-    """Benchmark Claude adapter overhead."""
-    result = BenchmarkResult("Claude Adapter")
-
-    # Setup
-    data = {"users": [{"id": i, "tenant_id": "acme"} for i in range(100)]}
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    try:
-        from datafence.integrations.anthropic_adapter import ClaudeAdapter
-
-        adapter = ClaudeAdapter(fence)
-
-        # Get tools once (cached)
-        tools = adapter.get_tools()
-
-        tool_name = "read_users"
-        tool_input = {"fields": ["id"], "limit": 10}
-        actor = {"id": "test", "tenant_id": "acme"}
-
-        # Warmup
-        for _ in range(10):
-            adapter.execute_tool(tool_name, tool_input, actor)
-
-        # Benchmark
-        for _ in range(iterations):
-            start = time.perf_counter()
-            try:
-                adapter.execute_tool(tool_name, tool_input, actor)
-                elapsed = time.perf_counter() - start
-                result.add_time(elapsed)
-            except Exception:
-                result.add_error()
-
-    except ImportError:
-        print("⚠️  Claude integration not installed")
-
-    return result
+def _make_boundary() -> DataFenceBoundary:
+    registry = ResourceRegistry()
+    registry.register(ResourceDefinition(
+        "orders",
+        fields={
+            "id":        FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            "total":     FieldDefinition("total", "decimal"),
+            "status":    FieldDefinition("status", "string"),
+        },
+        supported_operations=("read",),
+    ))
+    policy = DataFencePolicy("bench", "1.0", {"orders": ResourcePolicy(
+        "orders",
+        actions={"read": ActionDecision.ALLOW},
+        allowed_fields=["id", "tenant_id", "total", "status"],
+        filterable_fields=["id", "tenant_id", "status"],
+        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+        max_rows=50,
+    )})
+    engine = DataFencePolicyEngine(policy, registry=registry)
+    return DataFenceBoundary.create(engine, registry, token_bytes(32), capability_audience="bench")
 
 
-def benchmark_langchain_tool(iterations: int = 1000) -> BenchmarkResult:
-    """Benchmark LangChain tool overhead."""
-    result = BenchmarkResult("LangChain Tool")
-
-    # Setup
-    data = {"users": [{"id": i, "tenant_id": "acme"} for i in range(100)]}
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
-
-    try:
-        from datafence.integrations.langchain_tool import DataFenceTool
-
-        actor = {"id": "test", "tenant_id": "acme"}
-        tool = DataFenceTool(fence=fence, actor=actor)
-
-        # Warmup
-        for _ in range(10):
-            tool._run(resource="users", fields=["id"], limit=10)
-
-        # Benchmark
-        for _ in range(iterations):
-            start = time.perf_counter()
-            try:
-                tool._run(resource="users", fields=["id"], limit=10)
-                elapsed = time.perf_counter() - start
-                result.add_time(elapsed)
-            except Exception:
-                result.add_error()
-
-    except ImportError:
-        print("⚠️  LangChain integration not installed")
-
-    return result
+def bench(name: str, fn: "callable", iterations: int = 500) -> None:
+    times = []
+    for _ in range(iterations):
+        t0 = time.perf_counter()
+        fn()
+        times.append(time.perf_counter() - t0)
+    mean_ms = statistics.mean(times) * 1000
+    p99_ms = sorted(times)[int(0.99 * len(times))] * 1000
+    print(f"  {name:<45} mean={mean_ms:.3f}ms  p99={p99_ms:.3f}ms")
 
 
-def benchmark_schema_generation(iterations: int = 100) -> BenchmarkResult:
-    """Benchmark schema generation performance."""
-    result = BenchmarkResult("Schema Generation")
+def main() -> None:
+    boundary = _make_boundary()
+    principal = Principal("user:alice", "tenant-acme")
+    args_json = json.dumps({"resource": "orders", "fields": ["id", "total"], "limit": 5})
 
-    # Setup
-    data = {"users": []}
-    connector = MemoryConnector(data=data)
-    fence = DataFence.from_yaml("policies/basic.yaml", connector)
+    openai_tool = DataFenceOpenAITool(boundary)
+    anthropic_tool = DataFenceAnthropicTool(boundary)
+    lc_tool = DataFenceLangChainTool(boundary, principal)
 
-    try:
-        from datafence.integrations.openai_adapter import OpenAIAdapter
-
-        # Benchmark schema generation (not cached)
-        for _ in range(iterations):
-            start = time.perf_counter()
-            try:
-                adapter = OpenAIAdapter(fence)
-                functions = adapter.get_functions()
-                elapsed = time.perf_counter() - start
-                result.add_time(elapsed)
-            except Exception:
-                result.add_error()
-
-    except ImportError:
-        print("⚠️  OpenAI integration not installed")
-
-    return result
-
-
-def run_all_benchmarks(iterations: int = 1000):
-    """Run all integration benchmarks."""
-    print("=" * 60)
-    print("DataFence Integration Benchmarks")
-    print("=" * 60)
-    print(f"Iterations per benchmark: {iterations}")
-
-    benchmarks = [
-        (benchmark_openai_adapter, iterations),
-        (benchmark_claude_adapter, iterations),
-        (benchmark_langchain_tool, iterations),
-        (benchmark_schema_generation, 100),
-    ]
-
-    results = []
-    for benchmark_func, iters in benchmarks:
-        result = benchmark_func(iters)
-        if result.times:  # Only print if benchmark ran
-            result.print_summary()
-            results.append(result)
-
-    # Summary
-    if results:
-        print("\n" + "=" * 60)
-        print("Summary")
-        print("=" * 60)
-        for result in results:
-            print(f"{result.name:40} {result.avg:>8.2f}ms (p95: {result.p95:.2f}ms)")
+    print("DataFence v0.1 integration benchmarks")
+    print("=" * 70)
+    bench("OpenAI handle_call()", lambda: openai_tool.handle_call(principal, args_json))
+    bench("Anthropic handle_call()", lambda: anthropic_tool.handle_call(
+        principal, json.loads(args_json)
+    ))
+    bench("LangChain run()", lambda: lc_tool.run(args_json))
+    print()
 
 
 if __name__ == "__main__":
-    import sys
-
-    iterations = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
-    run_all_benchmarks(iterations)
+    main()
