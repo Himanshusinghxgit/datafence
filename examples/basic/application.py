@@ -25,7 +25,6 @@ from secrets import token_bytes
 
 from datafence import Actor, CapabilityVerifier, DataFenceBoundary, Intent, Operation
 from datafence.errors import PolicyDeniedError
-
 from examples.basic.connector import create_example_connector
 from examples.basic.policy import create_policy
 
@@ -92,7 +91,7 @@ def main() -> None:
     )
     authorized2 = fence.authorize(principal, intent_cross_tenant)
     result2 = connector.execute(authorized2)
-    print(f"  Policy enforced tenant_id = 'acme' regardless of agent request.")
+    print("  Policy enforced tenant_id = 'acme' regardless of agent request.")
     print(f"  Rows returned for ACME:   {result2.row_count}")
     for row in result2.rows:
         assert row.get("tenant_id", "acme") == "acme", "TENANT ISOLATION BREACH"

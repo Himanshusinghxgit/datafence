@@ -1,135 +1,205 @@
 """
-Anthropic Claude integration example.
+Anthropic Claude tool-use integration example.
 
-Demonstrates using DataFence with Claude tool use.
+Demonstrates using DataFence with Claude's tool use API.
+
+Architecture::
+
+    Claude 3.x
+        │  tool_use block: {"name": "datafence_query", "input": {...}}
+        ▼
+    DataFenceAnthropicTool.handle_call(principal, tool_input)
+        │  constructs Intent from block input (untrusted)
+        ▼
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
+        ▼
+    JSON capability returned as tool_result
+        │
+        ▼  pass to your connector
+    Customer-owned connector → enterprise data
+
+Run with:
+    pip install 'datafence[integrations]' anthropic
+    export ANTHROPIC_API_KEY=sk-ant-...
+    python claude_example.py
 """
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
-from datafence.integrations.anthropic_adapter import ClaudeAdapter, create_claude_agent
+from __future__ import annotations
 
-# Sample data
-sample_data = {
-    "transactions": [
+import json
+from secrets import token_bytes
+
+from datafence import (
+    DataFenceBoundary,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Principal,
+    ResourceDefinition,
+    ResourceRegistry,
+)
+from datafence.core.resources import PredicateOperator
+from datafence.integrations.anthropic_tool import DataFenceAnthropicTool
+
+# ---------------------------------------------------------------------------
+# Shared boundary setup
+# ---------------------------------------------------------------------------
+
+def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
+    registry = ResourceRegistry()
+    registry.register(
+        ResourceDefinition(
+            "documents",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "title":     FieldDefinition("title", "string"),
+                "author":    FieldDefinition("author", "string"),
+                "category":  FieldDefinition("category", "string"),
+            },
+            supported_operations=("read",),
+        )
+    )
+    from datafence import ActionDecision as _A
+    from datafence import DataFencePolicy as _P
+    from datafence import ResourcePolicy as _R
+    from datafence import RowRule as _RR
+    policy = _P(
+        "docs-policy", "1.0",
         {
-            "id": 1,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 100.00,
-            "merchant": "Coffee Shop",
-            "timestamp": "2024-01-15T10:30:00Z",
+            "documents": _R(
+                "documents",
+                actions={"read": _A.ALLOW},
+                allowed_fields=["id", "tenant_id", "title", "author", "category"],
+                row_rules=[_RR("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                max_rows=20,
+            )
         },
-        {
-            "id": 2,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 250.00,
-            "merchant": "Electronics Store",
-            "timestamp": "2024-01-16T14:20:00Z",
-        },
-        {
-            "id": 3,
-            "tenant_id": "acme",
-            "customer_id": "cust_456",
-            "amount": 50.00,
-            "merchant": "Restaurant",
-            "timestamp": "2024-01-16T19:00:00Z",
-        },
-    ]
-}
+    )
+    engine = DataFencePolicyEngine(policy, registry=registry)
+    signing_key = token_bytes(32)
+    boundary = DataFenceBoundary.create(
+        engine, registry, signing_key,
+        capability_audience="docs-service",
+    )
+    return boundary, signing_key
 
 
-def example_manual():
-    """Manual Claude tool use with DataFence."""
+# ---------------------------------------------------------------------------
+# Example A: direct tool call (no live Anthropic call required)
+# ---------------------------------------------------------------------------
+
+def example_direct_tool_call() -> None:
+    """
+    Demonstrate the authorization flow without a live Anthropic connection.
+    Simulates what happens when Claude issues a tool_use block.
+    """
     print("=" * 60)
-    print("Claude Manual Integration Example")
+    print("Anthropic DataFence Tool — direct call (no API key needed)")
     print("=" * 60)
 
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
+    boundary, _ = _make_boundary()
+    tool = DataFenceAnthropicTool(boundary, tool_name="datafence_query")
 
-    # Create adapter
-    adapter = ClaudeAdapter(fence)
+    # Inspect the tool spec (sent to Claude in the `tools=` parameter)
+    spec = tool.anthropic_tool_spec()
+    print(f"\n1. Tool spec name  : {spec['name']}")
+    print(f"   Description     : {spec['description'][:70]}...")
 
-    # Get tool schemas
-    tools = adapter.get_tools()
-
-    print(f"\n1. Generated {len(tools)} Claude tool(s):")
-    for tool in tools:
-        print(f"   - {tool['name']}: {tool['description']}")
-
-    # Simulate Claude tool use
-    print("\n2. Simulating Claude tool use...")
-    tool_name = "read_transactions"
+    # Simulate the input Claude would produce inside a tool_use block
     tool_input = {
-        "fields": ["id", "amount", "merchant"],
-        "filters": {"customer_id": "cust_123"},
-        "limit": 10,
+        "resource": "documents",
+        "fields": ["id", "title", "author"],
+        "filters": {"category": "engineering"},
+        "limit": 5,
     }
 
-    # Execute through DataFence
-    actor = {"id": "agent:banking-assistant", "tenant_id": "acme"}
+    # Principal from YOUR auth layer — never from Claude's output
+    principal = Principal(id="user:bob", tenant_id="tenant-beta")
 
-    result = adapter.execute_tool(tool_name, tool_input, actor=actor)
+    result_json = tool.handle_call(principal=principal, tool_input=tool_input)
+    result = json.loads(result_json)
 
-    print(f"\n3. Result:")
-    print(f"   Success: {result['success']}")
-    if result["success"]:
-        print(f"   Rows: {result['row_count']}")
-        print(f"   Data: {result['data']}")
+    print(f"\n2. Authorization result: {result['status']}")
+    if result["status"] == "authorized":
+        print(f"   execution_id   : {result['execution_id']}")
+        print(f"   resource       : {result['resource']}")
+        print(f"   authorized fields: {result['fields']}")
+        print(f"   predicates     : {result['predicates']}")
+        print(f"   limit          : {result['limit']}")
+        print()
+        print("   → Pass this capability to YOUR connector for execution.")
+        print("     DataFence does NOT execute the query.")
     else:
-        print(f"   Error: {result['error']}")
-        print(f"   Reasons: {result['reasons']}")
+        print(f"   reasons: {result['reasons']}")
 
-    # Create tool result block
-    print("\n4. Creating tool result block for Claude...")
-    tool_result = adapter.create_tool_result_block("tool_use_123", result)
-    print(f"   Type: {tool_result['type']}")
-    print(f"   Tool Use ID: {tool_result['tool_use_id']}")
+    # Show denial: requesting an unapproved operation
+    denied_json = tool.handle_call(
+        principal=principal,
+        tool_input={"resource": "documents", "operation": "delete"},
+    )
+    denied = json.loads(denied_json)
+    print(f"\n3. Denial example — status: {denied['status']}")
+    print(f"   reasons: {denied['reasons']}")
 
 
-def example_agent():
-    """Simple agent with Claude and DataFence."""
+# ---------------------------------------------------------------------------
+# Example B: live Anthropic call (requires ANTHROPIC_API_KEY)
+# ---------------------------------------------------------------------------
+
+def example_with_live_claude() -> None:
+    """
+    Full end-to-end with a real Claude model.
+    Requires: pip install anthropic && export ANTHROPIC_API_KEY=sk-ant-...
+    """
     print("\n" + "=" * 60)
-    print("Claude Agent Example")
+    print("Anthropic DataFence Tool — live model call")
     print("=" * 60)
 
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-    # Create agent (requires ANTHROPIC_API_KEY env var)
     try:
-        agent = create_claude_agent(
-            fence,
+        import anthropic
+    except ImportError:
+        print("⚠️  anthropic package not installed: pip install anthropic")
+        return
+
+    boundary, _ = _make_boundary()
+    tool = DataFenceAnthropicTool(boundary)
+
+    # Principal from your auth layer
+    principal = Principal(id="user:bob", tenant_id="tenant-beta")
+
+    client = anthropic.Anthropic()
+
+    try:
+        response = client.messages.create(
             model="claude-3-5-sonnet-20241022",
-            system_prompt="You are a banking assistant. Help users query their transaction data securely.",
             max_tokens=1024,
+            tools=[tool.anthropic_tool_spec()],
+            messages=[{"role": "user", "content": "Show me recent engineering documents."}],
         )
 
-        # Use agent
-        actor = {"id": "agent:banking-assistant", "tenant_id": "acme", "customer_id": "cust_123"}
+        for block in response.content:
+            if block.type == "tool_use":
+                result_json = tool.handle_call(
+                    principal=principal,
+                    tool_input=block.input,
+                )
+                result = json.loads(result_json)
+                print(f"\nClaude requested: {block.input}")
+                print(f"Authorization   : {result['status']}")
+                if result["status"] == "authorized":
+                    print(f"Capability      : execution_id={result['execution_id']}")
+                    print("→ Pass to your connector to retrieve data.")
+                else:
+                    print(f"Denied          : {result['reasons']}")
 
-        response = agent("Show me my recent transactions", actor=actor)
-
-        print(f"\nAgent response: {response}")
-
-    except ImportError:
-        print("\n⚠️  Anthropic package not installed")
-        print("Install with: pip install anthropic")
-    except Exception as e:
-        print(f"\n⚠️  Error: {e}")
-        print("Make sure ANTHROPIC_API_KEY environment variable is set")
+    except Exception as exc:
+        print(f"⚠️  Anthropic error: {exc}")
+        print("   Set ANTHROPIC_API_KEY and try again.")
 
 
 if __name__ == "__main__":
-    # Run examples
-    example_manual()
-
+    example_direct_tool_call()
+    example_with_live_claude()
     print("\n" + "=" * 60)
-    print("\nTo run the agent example, set ANTHROPIC_API_KEY and uncomment:")
-    print("# example_agent()")
-
-    print("\n" + "=" * 60)
-    print("✓ Examples complete")
+    print("✓ Example complete")

@@ -1,316 +1,181 @@
 # DataFence Integration Examples
 
-Examples demonstrating DataFence integration with popular AI frameworks and tools.
+Examples demonstrating how to use DataFence with popular AI frameworks.
+
+## Security model recap
+
+In every integration, the principal comes from **your auth layer**, not the AI:
+
+```
+AI framework (proposes Intent)
+        ↓
+DataFenceBoundary.authorize(principal, intent)
+        ↓
+AuthorizedExecution  ← signed capability
+        ↓
+Your connector  ← executes, you own this
+        ↓
+Enterprise data
+```
+
+DataFence returns a signed authorization capability — not database rows.
+
+---
 
 ## Installation
 
-Install DataFence with integration dependencies:
-
 ```bash
-# All integrations
-pip install 'datafence[all]'
+# Core only
+pip install datafence
 
-# Individual integrations
-pip install 'datafence[integrations]'  # OpenAI, Claude, LangChain
-pip install 'datafence[cli]'           # CLI tool
-pip install 'datafence[api]'           # REST API
+# With AI framework adapters
+pip install 'datafence[integrations]'   # openai, anthropic, langchain
+
+# REST API server
+pip install 'datafence[api]'
+
+# CLI tool
+pip install 'datafence[cli]'
 ```
+
+---
 
 ## Examples
 
-### 1. OpenAI Function Calling
-
-Use DataFence with OpenAI's function calling API.
+### 1. OpenAI function-calling (`openai_example.py`)
 
 ```bash
-export OPENAI_API_KEY=your-key
+export OPENAI_API_KEY=sk-...
 python openai_example.py
 ```
 
-**Features:**
-- Automatic function schema generation from policies
-- Secure execution through DataFence
-- Support for streaming responses
-- Simple agent helper function
+Uses `DataFenceOpenAITool` to expose the authorization boundary as an OpenAI
+function-calling tool.  The model's function call arguments become untrusted
+`Intent`; the `Principal` is provided by your application.
 
-**Use case:** AI assistants that query databases with automatic security enforcement.
+```python
+from datafence.integrations.openai_tool import DataFenceOpenAITool
+from datafence.core.principal import Principal
 
-### 2. Anthropic Claude Tool Use
+tool = DataFenceOpenAITool(boundary)
 
-Use DataFence with Claude's tool use API.
+# In your message loop, when the model calls the tool:
+principal = Principal(id="user:alice", tenant_id="acme")   # from YOUR auth
+result_json = tool.handle_call(
+    principal=principal,
+    arguments_json=tool_call.function.arguments,   # from the model
+)
+# result_json contains the signed capability — pass it to your connector.
+```
+
+---
+
+### 2. Anthropic Claude tool use (`claude_example.py`)
 
 ```bash
-export ANTHROPIC_API_KEY=your-key
+export ANTHROPIC_API_KEY=sk-ant-...
 python claude_example.py
 ```
 
-**Features:**
-- Tool schema generation from policies
-- Multi-turn tool use support
-- Simple agent helper function
-- Proper tool result formatting
+Uses `DataFenceAnthropicTool` to expose the boundary as a Claude tool_use
+tool.  The `tool_input` dict from Claude is untrusted `Intent`; the
+`Principal` is provided by your application.
 
-**Use case:** Claude-powered agents accessing secure data sources.
+```python
+from datafence.integrations.anthropic_tool import DataFenceAnthropicTool
+from datafence.core.principal import Principal
 
-### 3. LangChain Tools
+tool = DataFenceAnthropicTool(boundary)
 
-Use DataFence as LangChain tools in agent workflows.
+for block in response.content:
+    if block.type == "tool_use":
+        principal = Principal(id="user:alice", tenant_id="acme")
+        result_json = tool.handle_call(principal=principal, tool_input=block.input)
+        # result_json contains the signed capability.
+```
+
+---
+
+### 3. LangChain tool (`langchain_example.py`)
 
 ```bash
-export OPENAI_API_KEY=your-key
+export OPENAI_API_KEY=sk-...
 python langchain_example.py
 ```
 
-**Features:**
-- Generic tool for all resources
-- Resource-specific tools for better descriptions
-- Async support
-- Works with any LangChain agent
+Uses `DataFenceLangChainTool`.  The `Principal` is **bound at construction
+time** — a LangChain agent cannot change it during the conversation.
 
-**Use case:** LangChain agent applications with enterprise data access.
+```python
+from datafence.integrations.langchain_tool import DataFenceLangChainTool
+from datafence.core.principal import Principal
 
-### 4. CLI Tool
+principal = Principal(id="user:alice", tenant_id="acme")   # bound here
+tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
 
-Command-line interface for policy management and testing.
+# Direct use:
+result_json = tool.run('{"resource": "orders", "fields": ["id", "total"]}')
 
-```bash
-# Make executable
-chmod +x cli_example.sh
-
-# Run examples
-./cli_example.sh
+# Or as a proper LangChain tool (requires langchain installed):
+lc_tool = tool.as_langchain_tool()
 ```
 
-**Commands:**
-- `datafence init` - Create sample policy
-- `datafence validate` - Validate policy file
-- `datafence describe` - Show resource details
-- `datafence test` - Test requests (dry-run or execute)
-- `datafence export` - Export to framework schemas
+---
 
-**Use case:** Policy development, validation, and testing workflow.
-
-### 5. REST API
-
-Run DataFence as a REST API service.
+### 4. REST API (`api_example.py`)
 
 ```bash
-# Start server
-python -m datafence.api ../../policies/banking.yaml --port 8000 --api-key secret-123
+# Start the authorization server
+datafence api
 
-# In another terminal, run client
+# In another terminal, run the client example
 python api_example.py
 ```
 
-**Features:**
-- OpenAPI/Swagger documentation
-- API key authentication
-- CORS support
-- Health checks
-- Policy introspection
-
-**Use case:** Multi-language clients, microservices, remote access.
-
-## Quick Start Guide
-
-### OpenAI Integration
-
-```python
-from datafence import DataFence
-from datafence.integrations.openai_adapter import create_openai_agent
-
-fence = DataFence.from_yaml("policy.yaml", connector)
-agent = create_openai_agent(fence, model="gpt-4")
-
-response = agent(
-    "Show me transactions",
-    actor={"id": "user:123", "tenant_id": "acme"}
-)
-```
-
-### Claude Integration
-
-```python
-from datafence import DataFence
-from datafence.integrations.anthropic_adapter import create_claude_agent
-
-fence = DataFence.from_yaml("policy.yaml", connector)
-agent = create_claude_agent(fence, model="claude-3-5-sonnet-20241022")
-
-response = agent(
-    "Show me transactions",
-    actor={"id": "user:123", "tenant_id": "acme"}
-)
-```
-
-### LangChain Integration
-
-```python
-from datafence import DataFence
-from datafence.integrations.langchain_tool import create_datafence_tools
-
-fence = DataFence.from_yaml("policy.yaml", connector)
-tools = create_datafence_tools(fence, actor={"id": "user:123", "tenant_id": "acme"})
-
-# Use with any LangChain agent
-from langchain.agents import create_openai_functions_agent
-agent = create_openai_functions_agent(llm, tools, prompt)
-```
-
-### CLI Usage
+The API server exposes a `POST /authorize` endpoint.  The caller sends
+`Intent` in the body; the server resolves the `Principal` from the
+`Authorization: Bearer` header.  The response is a signed capability,
+**not database rows**.
 
 ```bash
-# Validate policy
-datafence validate policy.yaml
-
-# Test request
-datafence test policy.yaml request.json --dry-run
-
-# Export to OpenAI format
-datafence export policy.yaml --framework openai -o functions.json
-```
-
-### REST API
-
-```python
-from datafence import DataFence
-from datafence.api import run_api
-
-fence = DataFence.from_yaml("policy.yaml", connector)
-run_api(fence, port=8000, api_keys={"secret-key"})
-```
-
-Then use any HTTP client:
-```bash
-curl -X POST http://localhost:8000/execute \
-  -H "Authorization: Bearer secret-key" \
+curl -X POST http://localhost:8000/authorize \
+  -H "Authorization: Bearer your-session-token" \
   -H "Content-Type: application/json" \
-  -d '{
-    "actor": {"id": "user:123", "tenant_id": "acme"},
-    "operation": "read",
-    "resource": "transactions",
-    "fields": ["id", "amount"],
-    "limit": 10
-  }'
+  -d '{"resource": "orders", "fields": ["id", "total"], "limit": 5}'
 ```
 
-## Architecture
+---
 
-All integrations follow the same pattern:
+### 5. CLI (`cli_example.sh`)
 
-```
-┌─────────────────┐
-│   AI Framework  │  (OpenAI, Claude, LangChain)
-│   (proposes)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│    Adapter      │  Converts framework-specific format
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   DataFence     │  Enforces policies
-│   (decides)     │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│   Connector     │  Executes query
-└─────────────────┘
+```bash
+chmod +x cli_example.sh
+./cli_example.sh
 ```
 
-**Key principle:** The AI proposes actions, adapters translate, DataFence decides and enforces.
-
-## Security Notes
-
-1. **Adapters don't bypass security** - All requests go through DataFence policy enforcement
-2. **Actor information required** - Every request must include actor context
-3. **Policies apply consistently** - Same policies across all integrations
-4. **Evidence preserved** - All executions generate audit trails
-5. **API keys for production** - Use authentication for REST API in production
+---
 
 ## Troubleshooting
 
-### Import Errors
-
-```python
-# Error: No module named 'openai'
+```bash
+# Missing integrations package
 pip install 'datafence[integrations]'
 
-# Error: No module named 'click'
+# Missing API server
+pip install 'datafence[api]'
+
+# Missing CLI
 pip install 'datafence[cli]'
 
-# Error: No module named 'fastapi'
-pip install 'datafence[api]'
+# Missing framework keys
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-### Authentication Errors
+---
 
-```bash
-# OpenAI
-export OPENAI_API_KEY=your-key
+## Further reading
 
-# Claude
-export ANTHROPIC_API_KEY=your-key
-
-# API server
-python -m datafence.api policy.yaml --api-key your-secret
-```
-
-### Policy Errors
-
-```bash
-# Validate policy first
-datafence validate policy.yaml --verbose
-
-# Test request without execution
-datafence test policy.yaml request.json --dry-run
-```
-
-## Production Considerations
-
-### OpenAI/Claude Agents
-- Set appropriate timeouts
-- Handle rate limits
-- Log all executions
-- Monitor API costs
-- Cache policy schemas
-
-### LangChain
-- Use resource-specific tools for better performance
-- Set tool descriptions clearly
-- Handle tool errors gracefully
-- Consider async execution
-
-### CLI
-- Integrate into CI/CD for policy validation
-- Use in pre-commit hooks
-- Automate testing with sample requests
-
-### REST API
-- Use API key authentication
-- Enable rate limiting (add middleware)
-- Deploy behind reverse proxy (nginx, etc.)
-- Monitor endpoints
-- Use HTTPS in production
-- Consider horizontal scaling
-
-## Next Steps
-
-1. **Choose your framework** - Start with the integration matching your stack
-2. **Review the policy** - Check `../../policies/` for policy examples
-3. **Run the examples** - Test with sample data first
-4. **Adapt to your use case** - Modify for your data sources and policies
-5. **Deploy to production** - Follow security best practices
-
-## Resources
-
-- [DataFence Documentation](../../README.md)
-- [Policy Guide](../../docs/policies.md)
-- [Connector Guide](../../docs/connectors.md)
-- [Architecture](../../docs/architecture.md)
-- [OpenAI Function Calling](https://platform.openai.com/docs/guides/function-calling)
-- [Claude Tool Use](https://docs.anthropic.com/claude/docs/tool-use)
-- [LangChain Tools](https://python.langchain.com/docs/modules/agents/tools/)
+- [Connector Guide](../../docs/connectors.md) — implementing your connector
+- [Integration Guide](../../docs/integrations.md) — full integration patterns
+- [Architecture](../../docs/architecture.md) — security model

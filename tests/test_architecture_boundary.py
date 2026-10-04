@@ -33,7 +33,6 @@ from datafence import (
     FieldDefinition,
     Intent,
     Operation,
-    Principal,
     ResourceDefinition,
     ResourcePolicy,
     ResourceRegistry,
@@ -94,8 +93,9 @@ def _cap_to_dict(cap: AuthorizedExecution) -> dict[str, Any]:
 
 def _dict_to_cap(d: dict[str, Any]) -> AuthorizedExecution:
     from datetime import datetime, timezone
-    from datafence.core.types import Operation
+
     from datafence.core.principal import Principal
+    from datafence.core.types import Operation
 
     def _dt(s: str | None) -> datetime | None:
         if not s:

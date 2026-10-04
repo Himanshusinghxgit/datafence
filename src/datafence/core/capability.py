@@ -20,7 +20,7 @@ What this prevents:
 
 What this does NOT prevent:
 - Full Python runtime compromise (Threat Model C) — the signing key can be
-  extracted via Python introspection. This is explicitly out of scope.
+  extracted via Python introspection.  This is explicitly out of scope.
 - Replay attacks after the TTL window if the connector does not store nonces.
   Replay protection requires the connector to record consumed nonces.
   This is documented as a limitation; nonces provide uniqueness, not replay
@@ -29,11 +29,19 @@ What this does NOT prevent:
 Canonicalization note
 ---------------------
 Fields are joined with "|" after JSON-serializing structured values.
-Actor-controlled strings (actor.id, tenant_id, resource) could in principle
+Principal-controlled strings (actor.id, tenant_id, resource) could in principle
 contain "|" characters, creating ambiguity.  To prevent this, every
 variable-length field is length-prefixed: "<len>:<value>" before joining.
 This ensures the canonical representation is unambiguous regardless of
 field content.
+
+Predicate model
+---------------
+``predicates`` is the single, typed predicate list that connectors should
+compile.  Each entry is ``{"field": str, "operator": str, "value": Any}``.
+``filter_constraints()`` returns the same list for a stable accessor API.
+There is no separate EQ-only ``enforced_filters`` dict; that dual
+representation has been removed.
 """
 
 import hashlib
@@ -44,7 +52,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from datafence.core.principal import Principal as Actor  # Actor alias for capability fields
+from datafence.core.principal import Principal
 from datafence.core.types import Operation
 
 
@@ -64,6 +72,24 @@ class AuthorizedExecution:
 
     The customer connector MUST call CapabilityVerifier.verify() before
     translating this capability into any backend operation.
+
+    Fields
+    ------
+    execution_id      : Unique ID for this authorization event.
+    created_at        : UTC timestamp of issuance.
+    actor             : The authenticated Principal this was issued for.
+    resource          : Resource name (e.g. ``"orders"``).
+    operation         : Authorized operation type.
+    selected_fields   : Fields the connector may return.
+    predicates        : Typed row-filter predicates the connector must enforce.
+                        Each entry: ``{"field": str, "operator": str, "value": Any}``.
+    limit             : Maximum rows the connector may return.
+    policy_version    : Policy version that produced this capability.
+    policy_decisions  : Audit log of matched policy rule IDs.
+    expires_at        : UTC expiry timestamp.
+    audience          : Audience tag — connector must verify this matches.
+    nonce             : Unique per-issuance random value.
+    signature         : HMAC-SHA256 over all fields (internal).
     """
 
     # Execution metadata
@@ -71,17 +97,14 @@ class AuthorizedExecution:
     created_at: datetime
 
     # Authorization context
-    actor: Actor
+    actor: Principal
     resource: str
     operation: Operation
 
     # Authorized access (what the connector may execute)
     selected_fields: list[str]
-    enforced_filters: dict[str, Any]   # legacy EQ-only view; use enforced_predicates
-    limit: int
-
-    # Typed, lossless predicate list (full operator + value preserved)
-    enforced_predicates: list[dict[str, Any]] = field(default_factory=list)
+    predicates: list[dict[str, Any]] = field(default_factory=list)
+    limit: int = 0
 
     # Policy provenance
     policy_version: str = "unknown"
@@ -105,7 +128,7 @@ class AuthorizedExecution:
 
         Every security-relevant field is covered.
         Variable-length string fields are length-prefixed to prevent
-        canonicalization collisions caused by attacker-controlled values
+        canonicalization collisions caused by principal-controlled values
         that happen to contain the separator character.
         """
         parts = [
@@ -117,10 +140,9 @@ class AuthorizedExecution:
             _lp(self.resource),
             _lp(self.operation.value),
             _lp(json.dumps(sorted(self.selected_fields), separators=(",", ":"))),
-            _lp(json.dumps(self.enforced_filters, sort_keys=True, separators=(",", ":"))),
             _lp(
                 json.dumps(
-                    sorted(self.enforced_predicates, key=lambda p: json.dumps(p, sort_keys=True)),
+                    sorted(self.predicates, key=lambda p: json.dumps(p, sort_keys=True)),
                     separators=(",", ":"),
                 )
             ),
@@ -164,23 +186,16 @@ class AuthorizedExecution:
         reference = now or datetime.now(timezone.utc)
         # Handle both tz-aware and tz-naive expires_at (legacy data)
         if self.expires_at.tzinfo is None:
-            # Treat naive as UTC for comparison
             reference = reference.replace(tzinfo=None) if reference.tzinfo else reference
         return reference >= self.expires_at
 
     def filter_constraints(self) -> list[dict[str, Any]]:
-        """Return the lossless predicate list.
+        """Return the typed predicate list.
 
-        Includes full operator semantics — not just equality.
-        Connectors should compile from this, not from enforced_filters.
+        Each entry: ``{"field": str, "operator": str, "value": Any}``.
+        Connectors should compile row-filter clauses from this list.
         """
-        if self.enforced_predicates:
-            return list(self.enforced_predicates)
-        # Fallback: synthesize EQ predicates from the legacy dict view.
-        return [
-            {"field": f, "operator": "=", "value": v}
-            for f, v in self.enforced_filters.items()
-        ]
+        return list(self.predicates)
 
     # ------------------------------------------------------------------
     # Factory (called only by DataFenceBoundary)
@@ -189,11 +204,11 @@ class AuthorizedExecution:
     @staticmethod
     def _create_signed(
         execution_id: str,
-        actor: Actor,
+        actor: Principal,
         resource: str,
         operation: Operation,
         selected_fields: list[str],
-        enforced_filters: dict[str, Any],
+        enforced_predicates: list[dict[str, Any]],
         limit: int,
         policy_version: str,
         policy_decisions: list[str],
@@ -201,7 +216,9 @@ class AuthorizedExecution:
         expires_at: datetime | None = None,
         audience: str = "datafence",
         nonce: str | None = None,
-        enforced_predicates: list[dict[str, Any]] | None = None,
+        # Legacy kwarg accepted but ignored — callers that previously passed
+        # enforced_filters as a positional/keyword arg will not break hard.
+        enforced_filters: dict[str, Any] | None = None,
     ) -> "AuthorizedExecution":
         """
         Create a signed capability.
@@ -221,11 +238,10 @@ class AuthorizedExecution:
             resource=resource,
             operation=operation,
             selected_fields=selected_fields,
-            enforced_filters=enforced_filters,
+            predicates=list(enforced_predicates),
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
-            enforced_predicates=list(enforced_predicates or []),
             expires_at=effective_expires,
             audience=audience,
             nonce=effective_nonce,
@@ -241,11 +257,10 @@ class AuthorizedExecution:
             resource=resource,
             operation=operation,
             selected_fields=selected_fields,
-            enforced_filters=enforced_filters,
+            predicates=list(enforced_predicates),
             limit=limit,
             policy_version=policy_version,
             policy_decisions=policy_decisions,
-            enforced_predicates=list(enforced_predicates or []),
             expires_at=effective_expires,
             audience=audience,
             nonce=effective_nonce,

@@ -12,11 +12,8 @@ know or care what lives behind this connector.
 This example uses InMemoryReferenceConnector for simplicity.
 """
 
-from secrets import token_bytes
 
-from datafence.connectors.memory_connector import InMemoryReferenceConnector
-from datafence.connectors.protocol import ConnectorResult
-from datafence.core.capability import AuthorizedExecution
+from examples.reference_connector.memory import InMemoryReferenceConnector
 
 
 def create_example_connector(

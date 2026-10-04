@@ -1,159 +1,211 @@
 """
 LangChain integration example.
 
-Demonstrates using DataFence as LangChain tools.
+Demonstrates using DataFence as a LangChain tool so that a LangChain agent
+must pass through the authorization boundary before accessing data.
+
+Architecture::
+
+    LangChain agent
+        │  tool.run('{"resource": "reports", "fields": [...]}')
+        ▼
+    DataFenceLangChainTool._run(query_str)
+        │  parses JSON → Intent (untrusted)
+        ▼
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
+        ▼
+    JSON capability returned to agent
+        │
+        ▼  application passes capability to connector
+    Customer-owned connector → enterprise data
+
+Key security property: the Principal is bound at tool construction time.
+The LangChain agent cannot change or override it during the conversation.
+
+Run with:
+    pip install 'datafence[integrations]' langchain langchain-openai
+    export OPENAI_API_KEY=sk-...
+    python langchain_example.py
 """
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
-from datafence.integrations.langchain_tool import DataFenceTool, create_datafence_tools
+from __future__ import annotations
 
-# Sample data
-sample_data = {
-    "transactions": [
-        {
-            "id": 1,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 100.00,
-            "merchant": "Coffee Shop",
-            "timestamp": "2024-01-15T10:30:00Z",
-        },
-        {
-            "id": 2,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 250.00,
-            "merchant": "Electronics Store",
-            "timestamp": "2024-01-16T14:20:00Z",
-        },
-    ]
-}
+import json
+from secrets import token_bytes
 
+from datafence import (
+    ActionDecision,
+    DataFenceBoundary,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Principal,
+    ResourceDefinition,
+    ResourcePolicy,
+    ResourceRegistry,
+    RowRule,
+)
+from datafence.core.resources import PredicateOperator
+from datafence.integrations.langchain_tool import DataFenceLangChainTool
 
-def example_single_tool():
-    """Using DataFence as a single generic tool."""
-    print("=" * 60)
-    print("LangChain Single Tool Example")
-    print("=" * 60)
+# ---------------------------------------------------------------------------
+# Shared boundary setup
+# ---------------------------------------------------------------------------
 
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-    # Create actor
-    actor = {"id": "agent:banking-assistant", "tenant_id": "acme"}
-
-    # Create tool
-    tool = DataFenceTool(fence=fence, actor=actor)
-
-    print(f"\n1. Tool created: {tool.name}")
-    print(f"   Description: {tool.description}")
-
-    # Use tool directly
-    print("\n2. Using tool directly...")
-    result = tool._run(
-        resource="transactions",
-        fields=["id", "amount", "merchant"],
-        filters={"customer_id": "cust_123"},
-        limit=10,
-    )
-
-    print(f"   Result: {result}")
-
-
-def example_resource_tools():
-    """Creating resource-specific tools."""
-    print("\n" + "=" * 60)
-    print("LangChain Resource-Specific Tools Example")
-    print("=" * 60)
-
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-    # Create actor
-    actor = {"id": "agent:banking-assistant", "tenant_id": "acme"}
-
-    # Create resource-specific tools
-    tools = create_datafence_tools(fence, actor=actor)
-
-    print(f"\n1. Created {len(tools)} resource-specific tool(s):")
-    for tool in tools:
-        print(f"   - {tool.name}: {tool.description}")
-
-    # Use a tool
-    if tools:
-        print(f"\n2. Using {tools[0].name}...")
-        result = tools[0]._run(
-            fields=["id", "amount", "merchant"], filters={"customer_id": "cust_123"}, limit=10
+def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
+    registry = ResourceRegistry()
+    registry.register(
+        ResourceDefinition(
+            "reports",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "title":     FieldDefinition("title", "string"),
+                "department": FieldDefinition("department", "string"),
+                "period":    FieldDefinition("period", "string"),
+            },
+            supported_operations=("read",),
         )
-        print(f"   Result: {result}")
+    )
+    policy = DataFencePolicy(
+        "reports-policy", "1.0",
+        {
+            "reports": ResourcePolicy(
+                "reports",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=["id", "tenant_id", "title", "department", "period"],
+                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                max_rows=25,
+            )
+        },
+    )
+    engine = DataFencePolicyEngine(policy, registry=registry)
+    signing_key = token_bytes(32)
+    boundary = DataFenceBoundary.create(
+        engine, registry, signing_key,
+        capability_audience="reports-service",
+    )
+    return boundary, signing_key
 
 
-def example_agent():
-    """LangChain agent with DataFence tools."""
+# ---------------------------------------------------------------------------
+# Example A: direct tool use (no LangChain agent or API key needed)
+# ---------------------------------------------------------------------------
+
+def example_direct_tool_use() -> None:
+    """
+    Use DataFenceLangChainTool directly without a live LangChain agent.
+    Shows the authorization flow end-to-end.
+    """
+    print("=" * 60)
+    print("LangChain DataFence Tool — direct use (no API key needed)")
+    print("=" * 60)
+
+    boundary, _ = _make_boundary()
+
+    # Principal is bound at construction — agent cannot change it
+    principal = Principal(id="user:carol", tenant_id="tenant-gamma")
+    tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
+
+    print(f"\n1. Tool name : {tool.name}")
+    print(f"   Principal : {principal.id} / tenant={principal.tenant_id}")
+
+    # Tool accepts a JSON string (what a LangChain agent would produce)
+    query = json.dumps({
+        "resource": "reports",
+        "fields": ["id", "title", "department"],
+        "limit": 5,
+    })
+
+    result_json = tool.run(query)
+    result = json.loads(result_json)
+
+    print(f"\n2. Authorization result: {result['status']}")
+    if result["status"] == "authorized":
+        print(f"   execution_id   : {result['execution_id']}")
+        print(f"   resource       : {result['resource']}")
+        print(f"   authorized fields: {result['fields']}")
+        print(f"   predicates     : {result['predicates']}")
+        print(f"   limit          : {result['limit']}")
+        print()
+        print("   → Pass this capability to YOUR connector for execution.")
+        print("     DataFence does NOT execute the query.")
+    else:
+        print(f"   reasons: {result['reasons']}")
+
+    # Show that the agent cannot override the principal's tenant
+    tamper_query = json.dumps({
+        "resource": "reports",
+        "fields": ["id", "title"],
+        "filters": {"tenant_id": "evil-tenant"},   # agent tries to change tenant
+    })
+    tamper_result = json.loads(tool.run(tamper_query))
+    if tamper_result["status"] == "authorized":
+        predicates = tamper_result.get("predicates", [])
+        tenant_preds = [p for p in predicates if p["field"] == "tenant_id"]
+        print(f"\n3. Tenant isolation check: {tenant_preds}")
+        assert any(p["value"] == "tenant-gamma" for p in tenant_preds), (
+            "Policy must enforce the real tenant, not the agent-supplied one"
+        )
+        print("   ✓ Policy-enforced tenant filter overrides agent's attempt")
+
+
+# ---------------------------------------------------------------------------
+# Example B: LangChain agent (requires OPENAI_API_KEY + langchain)
+# ---------------------------------------------------------------------------
+
+def example_with_langchain_agent() -> None:
+    """
+    Wire DataFenceLangChainTool into a real LangChain agent.
+    Requires: pip install langchain langchain-openai && export OPENAI_API_KEY=sk-...
+    """
     print("\n" + "=" * 60)
-    print("LangChain Agent Example")
+    print("LangChain DataFence Tool — live agent")
     print("=" * 60)
 
     try:
-        from langchain_openai import ChatOpenAI
         from langchain.agents import AgentExecutor, create_openai_functions_agent
         from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
-
-        # Setup DataFence
-        connector = MemoryConnector(data=sample_data)
-        fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-        # Create actor
-        actor = {"id": "agent:banking-assistant", "tenant_id": "acme"}
-
-        # Create tools
-        tools = create_datafence_tools(fence, actor=actor)
-
-        # Create LLM
-        llm = ChatOpenAI(model="gpt-4", temperature=0)
-
-        # Create prompt
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", "You are a helpful banking assistant with access to transaction data."),
-                ("human", "{input}"),
-                MessagesPlaceholder(variable_name="agent_scratchpad"),
-            ]
-        )
-
-        # Create agent
-        agent = create_openai_functions_agent(llm, tools, prompt)
-        agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-
-        # Use agent
-        print("\n1. Agent created with DataFence tools")
-        print(f"   Tools: {[tool.name for tool in tools]}")
-
-        response = agent_executor.invoke(
-            {"input": "Show me transactions for customer cust_123"}
-        )
-
-        print(f"\n2. Agent response: {response['output']}")
-
+        from langchain_openai import ChatOpenAI
     except ImportError:
-        print("\n⚠️  LangChain packages not installed")
-        print("Install with: pip install langchain langchain-openai")
-    except Exception as e:
-        print(f"\n⚠️  Error: {e}")
-        print("Make sure OPENAI_API_KEY environment variable is set")
+        print("⚠️  LangChain not installed:")
+        print("   pip install langchain langchain-openai")
+        return
+
+    boundary, _ = _make_boundary()
+
+    # Principal bound here — agent cannot change it
+    principal = Principal(id="user:carol", tenant_id="tenant-gamma")
+    df_tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
+
+    try:
+        lc_tool = df_tool.as_langchain_tool()
+    except ImportError as exc:
+        print(f"⚠️  {exc}")
+        return
+
+    try:
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "You are a helpful analyst. Use available tools to fetch data."),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])
+        agent = create_openai_functions_agent(llm, [lc_tool], prompt)
+        executor = AgentExecutor(agent=agent, tools=[lc_tool], verbose=False)
+
+        response = executor.invoke({"input": "Show me the latest reports."})
+        print(f"\nAgent response: {response['output']}")
+        print("Note: the agent received a signed capability, not database rows.")
+
+    except Exception as exc:
+        print(f"⚠️  Agent error: {exc}")
+        print("   Set OPENAI_API_KEY and try again.")
 
 
 if __name__ == "__main__":
-    # Run examples
-    example_single_tool()
-    example_resource_tools()
-
+    example_direct_tool_use()
+    example_with_langchain_agent()
     print("\n" + "=" * 60)
-    print("\nTo run the agent example, set OPENAI_API_KEY and uncomment:")
-    print("# example_agent()")
-
-    print("\n" + "=" * 60)
-    print("✓ Examples complete")
+    print("✓ Example complete")

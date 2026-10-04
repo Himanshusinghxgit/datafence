@@ -37,7 +37,7 @@ from uuid import uuid4
 from datafence.core.capability import AuthorizedExecution
 from datafence.core.policy import PolicyDecision as EnginePolicyDecision
 from datafence.core.policy import PolicyEffect
-from datafence.core.principal import Principal as Actor
+from datafence.core.principal import Principal
 from datafence.core.registry import ResourceRegistry
 from datafence.core.resources import Filter
 from datafence.core.types import Intent, Request
@@ -47,7 +47,7 @@ from datafence.errors import PolicyDeniedError, PolicyError
 class PolicyEngine(Protocol):
     """Minimal generic policy contract required by DataFenceBoundary."""
 
-    def evaluate(self, principal: Actor, intent: Intent) -> EnginePolicyDecision: ...
+    def evaluate(self, principal: Principal, intent: Intent) -> EnginePolicyDecision: ...
 
 
 _SENTINEL = object()  # used to gate direct construction
@@ -127,7 +127,7 @@ class DataFenceBoundary:
     # Public API — the only execution path
     # ------------------------------------------------------------------
 
-    def authorize(self, principal: Actor, intent: Intent) -> AuthorizedExecution:
+    def authorize(self, principal: Principal, intent: Intent) -> AuthorizedExecution:
         """Authorize an intent and return a signed authorization capability.
 
         This is the *only* public method on DataFenceBoundary.
@@ -214,7 +214,6 @@ class DataFenceBoundary:
             resource=request.intent.resource,
             operation=request.intent.operation,
             selected_fields=selected_fields,
-            enforced_filters=resolved_filter.to_dict(),
             enforced_predicates=resolved_filter.to_constraints(),
             limit=limit,
             policy_version=decision.policy_version,

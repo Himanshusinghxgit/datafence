@@ -23,8 +23,10 @@ from typing import Any
 
 import pytest
 
+# Actor alias must still work
 from datafence import (
     ActionDecision,
+    Actor,
     AuthorizedExecution,
     CapabilityVerifier,
     DataFenceBoundary,
@@ -40,14 +42,10 @@ from datafence import (
     RowRule,
     YAMLPolicyLoader,
 )
-from datafence.connectors.memory_connector import InMemoryReferenceConnector
 from datafence.core.capability import CapabilityVerificationError
 from datafence.core.resources import PredicateOperator
 from datafence.errors import PolicyDeniedError, PolicyError
-
-# Actor alias must still work
-from datafence import Actor
-
+from examples.reference_connector.memory import InMemoryReferenceConnector
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -305,7 +303,7 @@ class TestCapabilityIntegrity:
                                  Intent("customers", Operation.READ, ["id"]))
         tampered = dataclasses.replace(
             cap,
-            enforced_predicates=[{"field": "tenant_id", "operator": "=", "value": "tenant-b"}],
+            predicates=[{"field": "tenant_id", "operator": "=", "value": "tenant-b"}],
         )
         assert not tampered.verify_signature(key)
 
@@ -674,6 +672,7 @@ class TestArchitectureBoundary:
 
     def test_core_boundary_has_no_db_imports(self) -> None:
         import inspect
+
         import datafence.core.boundary as mod
         source = inspect.getsource(mod)
         for lib in ("psycopg", "sqlite3", "boto3", "pyathena", "snowflake"):
@@ -766,3 +765,369 @@ class TestConnectorEndToEnd:
         result = connector.execute(cap)
         for row in result.rows:
             assert row.get("tenant_id", "tenant-a") == "tenant-a"
+
+
+# ===========================================================================
+# 8. MCP security invariants
+# ===========================================================================
+
+
+class TestMCPSecurityInvariants:
+    """
+    Invariants 5, 6, 7 from the task specification:
+
+    5. MCP cannot accept principal identity from agent-controlled arguments.
+    6. MCP requires trusted principal resolution (no optional fallback).
+    7. MCP returns authorization/capability information, not database rows.
+    """
+
+    def _make_server(self) -> tuple:
+        """Return (server, boundary, key) with a minimal resolver."""
+        boundary, key, _ = _make_boundary()
+
+        def resolver(ctx: dict) -> Principal:
+            return Principal(
+                id=ctx["user_id"],
+                tenant_id=ctx["tenant_id"],
+            )
+
+        from datafence.mcp.server import DataFenceMCPServer
+        server = DataFenceMCPServer(
+            boundary=boundary,
+            server_name="test",
+            principal_resolver=resolver,
+        )
+        return server, boundary, key
+
+    # ------------------------------------------------------------------
+    # Invariant 6: principal_resolver is REQUIRED
+    # ------------------------------------------------------------------
+
+    def test_mcp_server_requires_principal_resolver(self) -> None:
+        """Constructing DataFenceMCPServer without a resolver raises TypeError."""
+        from datafence.mcp.server import DataFenceMCPServer
+        boundary, _, _ = _make_boundary()
+        with pytest.raises(TypeError, match="principal_resolver"):
+            DataFenceMCPServer(boundary=boundary)
+
+    def test_mcp_server_resolver_none_raises(self) -> None:
+        """Passing principal_resolver=None explicitly must also raise."""
+        from datafence.mcp.server import DataFenceMCPServer
+        boundary, _, _ = _make_boundary()
+        with pytest.raises(TypeError, match="principal_resolver"):
+            DataFenceMCPServer(boundary=boundary, principal_resolver=None)
+
+    # ------------------------------------------------------------------
+    # Invariant 5: agent JSON cannot be identity source
+    # ------------------------------------------------------------------
+
+    def test_mcp_agent_cannot_inject_principal_via_arguments(self) -> None:
+        """
+        Agent-controlled ``arguments`` dict must not be used to set principal.
+        The session_context (transport-layer) is the only identity source.
+        """
+        server, _, _ = self._make_server()
+        # Even if the agent injects a user_id into arguments, the server
+        # must use session_context, not arguments.  Verify by checking the
+        # allowed response carries the resolver-produced tenant, not any
+        # value embedded in the tool arguments.
+        response = server.handle_call_tool(
+            tool_name="datafence_query",
+            arguments={
+                "resource": "customers",
+                "fields": ["id", "name"],
+                # attacker attempts to embed identity here — must be ignored
+                "user_id": "attacker:evil",
+                "tenant_id": "evil-tenant",
+            },
+            session_context={"user_id": "user:1", "tenant_id": "tenant-a"},
+        )
+        assert response.get("isError") is not True, (
+            "Expected an allowed response for a valid session context"
+        )
+        import json
+        payload = json.loads(response["content"][0]["text"])
+        assert payload["status"] == "authorized"
+        # The capability actor must reflect the session_context principal,
+        # not anything from the agent's arguments.
+        cap_data = payload["capability"]
+        # The resource/fields came from arguments — that is correct (Intent).
+        # The principal is not echoed into the MCP JSON but the policy
+        # enforcement (tenant filter) must reference the session tenant.
+        predicates = cap_data.get("predicates", [])
+        tenant_preds = [p for p in predicates if p["field"] == "tenant_id"]
+        assert any(p["value"] == "tenant-a" for p in tenant_preds), (
+            "Policy-enforced tenant filter must use session principal's tenant, "
+            "not any value from agent arguments"
+        )
+
+    def test_mcp_missing_session_context_causes_auth_error(self) -> None:
+        """
+        A resolver that requires a token must fail gracefully when no
+        session context is provided — not fall back to any default identity.
+        """
+        from datafence.mcp.server import DataFenceMCPServer
+        boundary, _, _ = _make_boundary()
+
+        def strict_resolver(ctx: dict) -> Principal:
+            if "user_id" not in ctx:
+                raise ValueError("No authenticated session context provided")
+            return Principal(id=ctx["user_id"], tenant_id=ctx["tenant_id"])
+
+        server = DataFenceMCPServer(
+            boundary=boundary,
+            principal_resolver=strict_resolver,
+        )
+        response = server.handle_call_tool(
+            tool_name="datafence_query",
+            arguments={"resource": "customers"},
+            session_context={},   # empty — no authenticated context
+        )
+        assert response.get("isError") is True
+        import json
+        payload = json.loads(response["content"][0]["text"])
+        assert "error" in payload
+
+    def test_mcp_resolver_returning_wrong_type_is_rejected(self) -> None:
+        """Resolver must return Principal; non-Principal is rejected."""
+        from datafence.mcp.server import DataFenceMCPServer
+        boundary, _, _ = _make_boundary()
+
+        def bad_resolver(ctx: dict) -> dict:  # type: ignore[return]
+            return {"id": "user:1", "tenant_id": "t"}   # dict, not Principal
+
+        server = DataFenceMCPServer(
+            boundary=boundary,
+            principal_resolver=bad_resolver,  # type: ignore[arg-type]
+        )
+        response = server.handle_call_tool(
+            tool_name="datafence_query",
+            arguments={"resource": "customers"},
+            session_context={"ok": True},
+        )
+        assert response.get("isError") is True
+
+    # ------------------------------------------------------------------
+    # Invariant 7: MCP response contains capability, not database rows
+    # ------------------------------------------------------------------
+
+    def test_mcp_allowed_response_contains_capability_not_rows(self) -> None:
+        """An allowed MCP response must describe the capability, never data rows."""
+        import json
+        server, _, _ = self._make_server()
+        response = server.handle_call_tool(
+            tool_name="datafence_query",
+            arguments={"resource": "customers", "fields": ["id", "name"]},
+            session_context={"user_id": "user:1", "tenant_id": "tenant-a"},
+        )
+        assert response.get("isError") is not True
+        payload = json.loads(response["content"][0]["text"])
+
+        assert payload["status"] == "authorized"
+        assert "capability" in payload
+        assert "request_id" in payload
+
+        # Must NOT contain database row fields
+        for forbidden in ("rows", "data", "row_count", "results", "records"):
+            assert forbidden not in payload, (
+                f"MCP response must not contain {forbidden!r} — "
+                "DataFence does not execute database operations"
+            )
+
+    def test_mcp_denied_response_contains_reasons_not_rows(self) -> None:
+        """A denied MCP response must contain denial reasons, not data."""
+        import json
+        server, _, _ = self._make_server()
+        response = server.handle_call_tool(
+            tool_name="datafence_query",
+            arguments={"resource": "customers", "operation": "delete"},
+            session_context={"user_id": "user:1", "tenant_id": "tenant-a"},
+        )
+        assert response.get("isError") is True
+        payload = json.loads(response["content"][0]["text"])
+        assert payload["status"] == "denied"
+        assert "reasons" in payload
+        for forbidden in ("rows", "data", "row_count"):
+            assert forbidden not in payload
+
+    def test_mcp_unknown_tool_returns_error(self) -> None:
+        """Calling a tool that was never registered must return an error."""
+        import json
+        server, _, _ = self._make_server()
+        response = server.handle_call_tool(
+            tool_name="nonexistent_tool",
+            arguments={},
+            session_context={"user_id": "user:1", "tenant_id": "tenant-a"},
+        )
+        assert response.get("isError") is True
+        payload = json.loads(response["content"][0]["text"])
+        assert "error" in payload
+
+    def test_mcp_handle_request_does_not_forward_agent_session(self) -> None:
+        """
+        handle_request() must NOT pass the agent's _session field to the
+        principal resolver.  Session context must come from the transport,
+        not the JSON-RPC body.
+        """
+        from datafence.mcp.server import DataFenceMCPServer
+        boundary, _, _ = _make_boundary()
+
+        calls: list[dict] = []
+
+        def recording_resolver(ctx: dict) -> Principal:
+            calls.append(ctx)
+            return Principal(id="user:1", tenant_id="tenant-a")
+
+        server = DataFenceMCPServer(
+            boundary=boundary,
+            principal_resolver=recording_resolver,
+        )
+        # The JSON-RPC request embeds a _session block under params
+        # (as some MCP clients do). It must NOT reach the resolver.
+        server.handle_request({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "datafence_query",
+                "arguments": {"resource": "customers"},
+                "_session": {"user_id": "attacker:evil", "tenant_id": "evil"},
+            },
+        })
+        # The resolver was called with an empty dict (None → {}), not _session.
+        assert calls, "resolver should have been called"
+        assert calls[0] == {}, (
+            "handle_request must pass empty context to resolver, "
+            "never the agent-provided _session field"
+        )
+
+
+# ===========================================================================
+# 9. Package boundary invariants
+# ===========================================================================
+
+
+class TestPackageBoundaryInvariants:
+    """
+    Invariants 10, 11, 12 from the task specification:
+
+    10. Legacy package is not present in the installed package.
+    11. Reference connectors are outside the installable core package.
+    12. Public API contains only intentional core concepts.
+    """
+
+    def test_legacy_package_not_importable(self) -> None:
+        """
+        src/datafence/_legacy/ has been deleted.
+        Attempting to import it must raise ImportError / ModuleNotFoundError.
+        """
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            import datafence._legacy  # type: ignore[import]  # noqa: F401
+
+    def test_reference_connector_not_in_core_package(self) -> None:
+        """
+        InMemoryReferenceConnector must NOT be importable from datafence.*
+        It lives under examples/, which is not part of the installable package.
+        """
+        import datafence
+        assert not hasattr(datafence, "InMemoryReferenceConnector"), (
+            "Reference connectors must live under examples/, not in the core package"
+        )
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            from datafence.connectors import (
+                InMemoryReferenceConnector,  # type: ignore  # noqa: F401
+            )
+
+    def test_core_package_has_no_memory_connector_module(self) -> None:
+        """memory_connector.py must not exist inside the core package."""
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            import datafence.connectors.memory_connector  # type: ignore[import]  # noqa: F401
+
+    def test_core_package_does_not_import_db_drivers(self) -> None:
+        """
+        DataFence core source files must not import any database driver.
+        Uses source inspection (not sys.modules) to be immune to test-runner
+        side effects such as pytest-cov importing sqlite3.
+        """
+        import importlib
+        import inspect
+        import pkgutil
+
+        db_libs = ("psycopg", "sqlite3", "boto3", "pyathena",
+                   "snowflake.connector", "pymysql", "pymongo")
+
+        import datafence.core as core_pkg
+        violations: list[str] = []
+        for _finder, mod_name, _ in pkgutil.walk_packages(
+            core_pkg.__path__, prefix="datafence.core."
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+                source = inspect.getsource(mod)
+                for lib in db_libs:
+                    if lib in source:
+                        violations.append(f"{mod_name} imports {lib!r}")
+            except Exception:
+                pass
+
+        assert violations == [], (
+            "Core modules must not import database drivers:\n" + "\n".join(violations)
+        )
+
+    def test_public_api_does_not_contain_legacy_types(self) -> None:
+        """
+        The public datafence namespace must not expose legacy v0.x types.
+        """
+        import datafence
+        legacy_names = [
+            "DataFence",           # v0.3 top-level class
+            "AllowedRequest",      # v0.3 result type
+            "DeniedRequest",       # v0.3 result type
+            "ExecutionPlan",       # v0.3/v0.4 internal type
+            "ExecutionResult",     # v0.3/v0.4 internal type
+            "SimplePolicyEngine",  # v0.3 policy helper
+            "ConnectorError",      # v0.3 error
+            "ExecutionError",      # v0.3 error
+        ]
+        for name in legacy_names:
+            assert not hasattr(datafence, name), (
+                f"Legacy type {name!r} must not be in the public API"
+            )
+
+    def test_public_api_does_not_expose_internal_types(self) -> None:
+        """
+        Internal plumbing types (Request, Decision) must not appear in
+        the public datafence namespace.  They are implementation details.
+        """
+        import datafence
+        internal_names = ["Request", "Decision"]
+        for name in internal_names:
+            assert not hasattr(datafence, name), (
+                f"Internal type {name!r} must not be exported in the public API"
+            )
+
+    def test_public_api_exposes_core_concepts(self) -> None:
+        """
+        The public API must expose the essential core concepts an integrator
+        needs: boundary, principal, intent, policy, registry, errors.
+        """
+        import datafence
+        required = [
+            "DataFenceBoundary",
+            "Principal",
+            "Intent",
+            "Operation",
+            "AuthorizedExecution",
+            "CapabilityVerifier",
+            "DataFencePolicyEngine",
+            "DataFencePolicy",
+            "ResourceRegistry",
+            "ResourceDefinition",
+            "FieldDefinition",
+            "PolicyDeniedError",
+            "DataFenceError",
+        ]
+        for name in required:
+            assert hasattr(datafence, name), (
+                f"Expected {name!r} in datafence public API"
+            )

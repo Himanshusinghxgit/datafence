@@ -1,505 +1,191 @@
-## Monitoring Guide
+# Monitoring Guide
 
-Comprehensive guide for monitoring DataFence in production.
+## What DataFence exposes
 
-## Overview
+DataFence is an authorization library, not an execution engine.
+It does not ship a monitoring framework, metrics collector, or Prometheus
+exporter.  Observability is implemented by the **host application**, which
+has full control over the transport, logging infrastructure, and metrics
+stack.
 
-DataFence provides built-in monitoring capabilities:
+What DataFence provides that you can observe:
 
-- **Metrics**: Prometheus-compatible metrics
-- **Logging**: Structured JSON logging
-- **Health Checks**: Liveness and readiness probes
-- **Audit Logs**: Security event tracking
-- **Performance Monitoring**: Request timing and statistics
+| Observable | How to access it |
+|---|---|
+| Authorization decision (allow/deny) | The return value / exception of `boundary.authorize()` |
+| Denial reasons | `PolicyDeniedError.args[0]` |
+| Capability metadata | Fields on `AuthorizedExecution` |
+| Execution ID | `capability.execution_id` (unique per authorization event) |
+| Principal + tenant | `capability.actor.id`, `capability.actor.tenant_id` |
+| Authorized fields | `capability.selected_fields` |
+| Enforced predicates | `capability.filter_constraints()` |
+| Policy version | `capability.policy_version` |
+| Expiry | `capability.expires_at` |
+| Audience | `capability.audience` |
+
+---
+
+## Structured audit logging
+
+Wrap `boundary.authorize()` in your application's logging layer:
+
+```python
+import logging
+import time
+from datafence import DataFenceBoundary, Principal, Intent, Operation
+from datafence.errors import PolicyDeniedError
+
+logger = logging.getLogger("datafence.audit")
+
+def authorized_query(boundary: DataFenceBoundary,
+                     principal: Principal,
+                     intent: Intent) -> "AuthorizedExecution":
+    start = time.monotonic()
+    try:
+        capability = boundary.authorize(principal, intent)
+        logger.info(
+            "authorization.allowed",
+            extra={
+                "execution_id":   capability.execution_id,
+                "actor_id":       capability.actor.id,
+                "tenant_id":      capability.actor.tenant_id,
+                "resource":       capability.resource,
+                "operation":      capability.operation.value,
+                "fields":         capability.selected_fields,
+                "policy_version": capability.policy_version,
+                "duration_ms":    round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        return capability
+    except PolicyDeniedError as exc:
+        logger.warning(
+            "authorization.denied",
+            extra={
+                "actor_id":   principal.id,
+                "tenant_id":  principal.tenant_id,
+                "resource":   intent.resource,
+                "operation":  intent.operation.value,
+                "reasons":    str(exc),
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise
+```
+
+Output (JSON formatter configured separately):
+
+```json
+{
+  "event": "authorization.allowed",
+  "execution_id": "exec_a1b2c3d4",
+  "actor_id": "user:alice",
+  "tenant_id": "tenant-acme",
+  "resource": "orders",
+  "operation": "read",
+  "fields": ["id", "total", "status"],
+  "policy_version": "orders-v1 / 1.0",
+  "duration_ms": 1.3
+}
+```
+
+---
 
 ## Metrics
 
-### Prometheus Metrics
-
-DataFence exposes Prometheus-compatible metrics for monitoring.
-
-#### Setup
+DataFence does not instrument itself.  Add counters in your wrapper:
 
 ```python
-from datafence import DataFence
-from datafence.monitoring import get_metrics_collector
+# Pseudocode — use your preferred metrics library (Prometheus, StatsD, etc.)
 
-fence = DataFence.from_yaml("policy.yaml", connector)
-collector = get_metrics_collector()
+from prometheus_client import Counter, Histogram
 
-# Execute requests
-result = fence.execute(request)
+ALLOW = Counter("datafence_authorizations_allowed_total",
+                "Authorizations granted", ["resource", "tenant"])
+DENY  = Counter("datafence_authorizations_denied_total",
+                "Authorizations denied",  ["resource", "tenant"])
+LATENCY = Histogram("datafence_authorization_duration_seconds",
+                    "Authorization latency", ["resource"])
 
-# Export metrics
-print(collector.export_prometheus())
+def authorized_query(boundary, principal, intent):
+    with LATENCY.labels(resource=intent.resource).time():
+        try:
+            cap = boundary.authorize(principal, intent)
+            ALLOW.labels(resource=intent.resource,
+                         tenant=principal.tenant_id).inc()
+            return cap
+        except PolicyDeniedError:
+            DENY.labels(resource=intent.resource,
+                        tenant=principal.tenant_id).inc()
+            raise
 ```
 
-#### Available Metrics
+---
 
-**Request Counters:**
-- `datafence_requests_total` - Total requests processed
-- `datafence_requests_allowed` - Requests allowed by policy
-- `datafence_requests_denied` - Requests denied by policy
-- `datafence_requests_errors` - Requests that resulted in errors
+## Health checks
 
-**Security Counters:**
-- `datafence_sql_firewall_blocks` - Queries blocked by SQL firewall
-- `datafence_pii_detections` - PII instances detected
-- `datafence_pii_redactions` - PII instances redacted
-
-**Performance Histograms:**
-- `datafence_request_duration_seconds` - Full request processing time
-- `datafence_policy_eval_duration_seconds` - Policy evaluation time
-- `datafence_connector_duration_seconds` - Database query time
-
-#### Metrics Middleware
-
-Automatically collect metrics for all requests:
-
-```python
-from datafence.monitoring.metrics import MetricsMiddleware
-
-middleware = MetricsMiddleware(fence)
-result = middleware.execute(request)
-
-# Metrics are automatically recorded
-```
-
-#### Prometheus Integration
-
-Expose metrics at `/metrics` endpoint:
+DataFence has no runtime state to health-check beyond the boundary being
+instantiated.  A simple liveness check for a service embedding DataFence:
 
 ```python
 from fastapi import FastAPI
-from datafence.monitoring import get_metrics_collector
 
 app = FastAPI()
 
-@app.get("/metrics")
-def metrics():
-    collector = get_metrics_collector()
-    return Response(
-        content=collector.export_prometheus(),
-        media_type="text/plain"
-    )
-```
-
-### Grafana Dashboard
-
-Example Grafana queries:
-
-**Request Rate:**
-```promql
-rate(datafence_requests_total[5m])
-```
-
-**Success Rate:**
-```promql
-rate(datafence_requests_allowed[5m]) / rate(datafence_requests_total[5m])
-```
-
-**Average Latency:**
-```promql
-rate(datafence_request_duration_seconds_sum[5m]) / rate(datafence_request_duration_seconds_count[5m])
-```
-
-**p95 Latency:**
-```promql
-histogram_quantile(0.95, rate(datafence_request_duration_seconds_bucket[5m]))
-```
-
-## Logging
-
-### Structured Logging
-
-DataFence supports structured JSON logging for production.
-
-#### Setup
-
-```python
-from datafence.monitoring import setup_logging, get_logger
-
-# Setup JSON logging
-setup_logging(level="INFO", format="json", output="stdout")
-
-# Get logger
-logger = get_logger(__name__)
-
-# Log with context
-logger.info(
-    "Request processed",
-    extra={
-        "actor_id": "user:123",
-        "tenant_id": "acme",
-        "resource": "transactions",
-        "decision": "allow"
-    }
-)
-```
-
-Output:
-```json
-{
-  "timestamp": "2024-01-15T10:30:00.123Z",
-  "level": "INFO",
-  "logger": "datafence.engine",
-  "message": "Request processed",
-  "actor_id": "user:123",
-  "tenant_id": "acme",
-  "resource": "transactions",
-  "decision": "allow"
-}
-```
-
-#### Logging Middleware
-
-Automatically log all requests:
-
-```python
-from datafence.monitoring.logging import LoggingMiddleware
-
-middleware = LoggingMiddleware(fence)
-result = middleware.execute(request)
-
-# Logs are automatically generated
-```
-
-### Audit Logging
-
-Separate audit logs for security and compliance:
-
-```python
-from datafence.monitoring.logging import AuditLogger
-
-audit = AuditLogger(output_file="datafence-audit.log")
-
-# Log data access
-audit.log_access(
-    actor_id="user:123",
-    tenant_id="acme",
-    operation="read",
-    resource="transactions",
-    decision="allow",
-    fields=["id", "amount"],
-    row_count=10
-)
-
-# Log policy violation
-audit.log_policy_violation(
-    actor_id="agent:bot",
-    tenant_id="acme",
-    operation="read",
-    resource="transactions",
-    reasons=["Field 'ssn' is denied"]
-)
-
-# Log SQL injection attempt
-audit.log_sql_injection_attempt(
-    actor_id="user:suspicious",
-    tenant_id="acme",
-    query="SELECT * FROM users WHERE id='1' OR '1'='1'",
-    reason="SQL injection pattern detected"
-)
-
-# Log PII access
-audit.log_pii_access(
-    actor_id="user:123",
-    tenant_id="acme",
-    resource="customers",
-    pii_types=["email", "phone"],
-    redacted=True
-)
-```
-
-### Log Aggregation
-
-Forward logs to aggregation systems:
-
-**Elasticsearch/Kibana:**
-```bash
-# Filebeat configuration
-filebeat.inputs:
-- type: log
-  paths:
-    - /var/log/datafence/*.log
-  json.keys_under_root: true
-  json.add_error_key: true
-
-output.elasticsearch:
-  hosts: ["localhost:9200"]
-```
-
-**CloudWatch Logs:**
-```python
-import watchtower
-
-handler = watchtower.CloudWatchLogHandler(log_group="datafence")
-logger.addHandler(handler)
-```
-
-**Datadog:**
-```python
-from datadog import initialize, statsd
-
-initialize(api_key="YOUR_KEY", app_key="YOUR_APP_KEY")
-
-# Log to Datadog
-statsd.increment('datafence.requests.total')
-```
-
-## Health Checks
-
-### Basic Health Check
-
-```python
-from datafence.monitoring import HealthChecker
-
-checker = HealthChecker(fence)
-health = checker.check_all()
-
-print(health)
-# {
-#   "status": "healthy",
-#   "uptime_seconds": 3600.5,
-#   "checks": {
-#     "uptime": {"status": "healthy", "message": "..."},
-#     "policy": {"status": "healthy", "message": "..."},
-#     "connector": {"status": "healthy", "message": "..."}
-#   }
-# }
-```
-
-### Kubernetes Probes
-
-#### Liveness Probe
-
-Checks if the service is alive (not deadlocked):
-
-```python
-from datafence.monitoring.health import LivenessChecker
-
-liveness = LivenessChecker()
-
-@app.get("/healthz")
-def liveness_check():
-    return liveness.check()
-```
-
-Kubernetes configuration:
-```yaml
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: 8000
-  initialDelaySeconds: 10
-  periodSeconds: 10
-```
-
-#### Readiness Probe
-
-Checks if the service is ready to accept traffic:
-
-```python
-from datafence.monitoring.health import ReadinessChecker
-
-readiness = ReadinessChecker(fence)
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok"}
 
 @app.get("/ready")
-def readiness_check():
-    result = readiness.check()
-    status_code = 200 if result["ready"] else 503
-    return Response(content=json.dumps(result), status_code=status_code)
-```
-
-Kubernetes configuration:
-```yaml
-readinessProbe:
-  httpGet:
-    path: /ready
-    port: 8000
-  initialDelaySeconds: 5
-  periodSeconds: 5
-```
-
-### FastAPI Integration
-
-```python
-from fastapi import FastAPI
-from datafence.monitoring.health import create_health_endpoint
-
-app = FastAPI()
-
-# Auto-configured health endpoint
-health_endpoint = create_health_endpoint(fence)
-app.get("/health")(health_endpoint)
-```
-
-## Performance Monitoring
-
-### Request Timing
-
-Track request performance:
-
-```python
-from datafence.optimization import get_performance_monitor
-
-monitor = get_performance_monitor()
-
-# Timing is automatically recorded
-result = fence.execute(request)
-
-# Get statistics
-stats = monitor.get_stats("request_execution")
-print(f"Average: {stats['avg']:.2f}s")
-print(f"p95: {stats['p95']:.2f}s")
-```
-
-### Custom Metrics
-
-Add custom metrics:
-
-```python
-from datafence.monitoring import get_metrics_collector
-
-collector = get_metrics_collector()
-
-# Register custom counter
-collector.register_counter("my_custom_metric", "My custom metric")
-
-# Increment
-collector.inc_counter("my_custom_metric")
-
-# Register custom histogram
-collector.register_histogram("my_latency", "My latency metric")
-
-# Observe value
-collector.observe_histogram("my_latency", 0.150)
-```
-
-## Alerting
-
-### Prometheus Alerts
-
-Example alert rules:
-
-```yaml
-groups:
-- name: datafence
-  rules:
-  # High error rate
-  - alert: DataFenceHighErrorRate
-    expr: rate(datafence_requests_errors[5m]) > 0.1
-    for: 5m
-    annotations:
-      summary: "High error rate in DataFence"
-
-  # High denial rate
-  - alert: DataFenceHighDenialRate
-    expr: rate(datafence_requests_denied[5m]) / rate(datafence_requests_total[5m]) > 0.5
-    for: 10m
-    annotations:
-      summary: "High policy denial rate"
-
-  # High latency
-  - alert: DataFenceHighLatency
-    expr: histogram_quantile(0.95, rate(datafence_request_duration_seconds_bucket[5m])) > 0.5
-    for: 10m
-    annotations:
-      summary: "p95 latency above 500ms"
-
-  # SQL injection attempts
-  - alert: DataFenceSQLInjection
-    expr: increase(datafence_sql_firewall_blocks[1h]) > 10
-    annotations:
-      summary: "Multiple SQL injection attempts detected"
-```
-
-### Log-Based Alerts
-
-Alert on security events:
-
-```json
-{
-  "alert": "SQL Injection Attempt",
-  "query": "event_type:sql_injection_attempt",
-  "threshold": "count > 5 in 1 hour"
-}
-```
-
-## Dashboards
-
-### Example Grafana Dashboard
-
-Key panels:
-
-1. **Request Rate** - Requests per second
-2. **Success Rate** - Percentage of allowed requests
-3. **Error Rate** - Percentage of errors
-4. **Latency** - p50, p95, p99 latencies
-5. **Security Events** - SQL firewall blocks, PII detections
-6. **Resource Usage** - By tenant, resource, actor
-
-### Example Datadog Dashboard
-
-```python
-{
-  "title": "DataFence Overview",
-  "widgets": [
-    {
-      "title": "Request Rate",
-      "type": "timeseries",
-      "query": "rate(datafence.requests.total{*}.as_count())"
-    },
-    {
-      "title": "Policy Decisions",
-      "type": "query_value",
-      "query": "sum:datafence.requests.allowed{*}.as_count()"
+def ready(boundary: DataFenceBoundary = Depends(get_boundary)) -> dict:
+    # If boundary.registry is frozen and accessible, DataFence is ready.
+    return {
+        "ready": boundary.registry.is_frozen,
+        "resources": list(boundary.registry.resources.keys()),
     }
-  ]
-}
 ```
 
-## Troubleshooting
+---
 
-### High Latency
+## Audit trail recommendations
 
-Check:
-1. Database performance (connector latency)
-2. PII detection overhead (disable if not needed)
-3. Complex policies (simplify if possible)
-4. Connection pool size (increase if needed)
+Each `AuthorizedExecution` is cryptographically unique (HMAC + nonce).
+Store `execution_id` in your audit log when the connector executes it.
+This creates an end-to-end trace:
 
-### High Denial Rate
+```
+authorization event  →  execution_id  →  connector execution log
+```
 
-Check:
-1. Policy configuration (too restrictive?)
-2. Actor permissions (correct tenant_id?)
-3. Field restrictions (requesting denied fields?)
+Fields to capture per authorization event:
 
-### Memory Usage
+- `execution_id` — correlates authorization to connector execution
+- `actor_id`, `tenant_id` — who authorized
+- `resource`, `operation` — what was requested
+- `selected_fields` — what fields were permitted
+- `predicates` — what row-level filters were enforced
+- `policy_version` — which policy version made the decision
+- `expires_at` — when the capability expires
+- `timestamp` (your system clock) — when the event occurred
 
-Monitor:
-1. Schema cache size (use `clear_schema_cache()` if needed)
-2. Query cache size (adjust max_size)
-3. Log buffer size (rotate logs regularly)
+---
 
-## Best Practices
+## Alerting recommendations
 
-1. **Use Structured Logging** - JSON format for easy parsing
-2. **Export Metrics** - Expose `/metrics` endpoint for Prometheus
-3. **Set Up Alerts** - High error rate, high latency, security events
-4. **Dashboard Creation** - Key metrics visible at a glance
-5. **Audit Logging** - Separate logs for compliance
-6. **Health Checks** - Kubernetes liveness/readiness probes
-7. **Performance Monitoring** - Track latency trends
-8. **Log Rotation** - Prevent disk space issues
-9. **Retention Policies** - Keep metrics for 30+ days
-10. **Security Monitoring** - Alert on suspicious patterns
+Since you own the metrics layer, alert on patterns relevant to your
+organization.  Common signals:
 
-## Next Steps
+| Signal | Metric to watch |
+|---|---|
+| Sudden spike in denials for a tenant | `datafence_authorizations_denied_total{tenant="..."}` |
+| Requests for restricted fields | Log `reasons` containing `"denied_fields"` |
+| Unusual operation types | Filter on `operation=delete` or `insert` |
+| High authorization latency | p95 of `datafence_authorization_duration_seconds` |
+| Expired capabilities rejected by connector | Connector-side metric |
 
-- Set up Prometheus scraping
-- Create Grafana dashboards
-- Configure log aggregation
-- Set up alerting rules
-- Review audit logs regularly
+---
+
+## Further reading
+
+- [Architecture](architecture.md) — security model and trust boundaries
+- [Threat Model](threat-model.md) — attack surface and residual risks
+- [Connector Guide](connectors.md) — connector-side verification and execution

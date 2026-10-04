@@ -25,7 +25,6 @@ from datafence import (
     RowRule,
 )
 from datafence.core.resources import PredicateOperator
-
 from examples.basic.registry import create_registry  # package-level import
 
 

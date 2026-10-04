@@ -1,146 +1,218 @@
 """
-OpenAI integration example.
+OpenAI function-calling integration example.
 
-Demonstrates using DataFence with OpenAI function calling.
+Demonstrates using DataFence with OpenAI's function/tool calling API.
+
+Architecture::
+
+    GPT-4 / GPT-4o
+        │  tool call: {"name": "datafence_query", "arguments": {...}}
+        ▼
+    DataFenceOpenAITool.handle_call(principal, arguments_json)
+        │  constructs Intent from model args (untrusted)
+        ▼
+    DataFenceBoundary.authorize(principal, intent)
+        │  Registry → Policy → AuthorizedExecution (signed)
+        ▼
+    JSON capability returned to caller
+        │
+        ▼  pass to your connector
+    Customer-owned connector → enterprise data
+
+Run with:
+    pip install 'datafence[integrations]' openai
+    export OPENAI_API_KEY=sk-...
+    python openai_example.py
 """
 
-from datafence import DataFence
-from datafence.connectors import MemoryConnector
-from datafence.integrations.openai_adapter import OpenAIAdapter, create_openai_agent
+from __future__ import annotations
 
-# Sample data
-sample_data = {
-    "transactions": [
+import json
+from secrets import token_bytes
+
+from datafence import (
+    ActionDecision,
+    DataFenceBoundary,
+    DataFencePolicy,
+    DataFencePolicyEngine,
+    FieldDefinition,
+    Principal,
+    ResourceDefinition,
+    ResourcePolicy,
+    ResourceRegistry,
+    RowRule,
+)
+from datafence.core.resources import PredicateOperator
+from datafence.integrations.openai_tool import DataFenceOpenAITool
+
+# ---------------------------------------------------------------------------
+# 1. Build the registry — what resources exist
+# ---------------------------------------------------------------------------
+
+def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
+    registry = ResourceRegistry()
+    registry.register(
+        ResourceDefinition(
+            "orders",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "total":     FieldDefinition("total", "decimal"),
+                "status":    FieldDefinition("status", "string"),
+                "merchant":  FieldDefinition("merchant", "string"),
+            },
+            supported_operations=("read",),
+        )
+    )
+
+    # 2. Define the policy — who can do what
+    policy = DataFencePolicy(
+        "orders-policy",
+        "1.0",
         {
-            "id": 1,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 100.00,
-            "merchant": "Coffee Shop",
-            "timestamp": "2024-01-15T10:30:00Z",
+            "orders": ResourcePolicy(
+                "orders",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=["id", "tenant_id", "total", "status", "merchant"],
+                row_rules=[
+                    RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id"),
+                ],
+                max_rows=50,
+            )
         },
-        {
-            "id": 2,
-            "tenant_id": "acme",
-            "customer_id": "cust_123",
-            "amount": 250.00,
-            "merchant": "Electronics Store",
-            "timestamp": "2024-01-16T14:20:00Z",
-        },
-        {
-            "id": 3,
-            "tenant_id": "acme",
-            "customer_id": "cust_456",
-            "amount": 50.00,
-            "merchant": "Restaurant",
-            "timestamp": "2024-01-16T19:00:00Z",
-        },
-    ]
-}
+    )
+    engine = DataFencePolicyEngine(policy, registry=registry)
+
+    # 3. Create the boundary — keep the key secret in production
+    signing_key = token_bytes(32)
+    boundary = DataFenceBoundary.create(
+        engine, registry, signing_key,
+        capability_audience="orders-service",
+    )
+    return boundary, signing_key
 
 
-def example_manual():
-    """Manual OpenAI function calling with DataFence."""
+# ---------------------------------------------------------------------------
+# Example A: direct tool call (no live OpenAI call required)
+# ---------------------------------------------------------------------------
+
+def example_direct_tool_call() -> None:
+    """
+    Demonstrate the authorization flow without a live OpenAI connection.
+
+    This simulates what happens when the model issues a function call:
+    the tool argument JSON becomes Intent; the Principal comes from your
+    auth layer.
+    """
     print("=" * 60)
-    print("OpenAI Manual Integration Example")
+    print("OpenAI DataFence Tool — direct call (no API key needed)")
     print("=" * 60)
 
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
+    boundary, signing_key = _make_boundary()
+    tool = DataFenceOpenAITool(boundary, tool_name="datafence_query")
 
-    # Create adapter
-    adapter = OpenAIAdapter(fence)
+    # Inspect the tool spec (sent to OpenAI in the `tools=` parameter)
+    spec = tool.openai_tool_spec()
+    print(f"\n1. Tool spec name  : {spec['function']['name']}")
+    print(f"   Description     : {spec['function']['description'][:70]}...")
 
-    # Get function schemas
-    functions = adapter.get_functions()
+    # Simulate the arguments the model would produce
+    model_arguments = json.dumps({
+        "resource": "orders",
+        "fields": ["id", "total", "status"],
+        "filters": {"merchant": "Acme Corp"},
+        "limit": 5,
+    })
 
-    print(f"\n1. Generated {len(functions)} OpenAI function(s):")
-    for func in functions:
-        print(f"   - {func['name']}: {func['description']}")
+    # Principal from YOUR auth layer — never from model output
+    principal = Principal(id="user:alice", tenant_id="tenant-acme")
 
-    # Simulate OpenAI function call
-    print("\n2. Simulating OpenAI function call...")
-    function_call = {
-        "name": "read_transactions",
-        "arguments": '{"fields": ["id", "amount", "merchant"], "filters": {"customer_id": "cust_123"}, "limit": 10}',
-    }
+    result_json = tool.handle_call(
+        principal=principal,
+        arguments_json=model_arguments,
+    )
+    result = json.loads(result_json)
 
-    # Execute through DataFence
-    actor = {"id": "agent:banking-assistant", "tenant_id": "acme"}
-
-    result = adapter.execute_function_call(function_call, actor=actor)
-
-    print(f"\n3. Result:")
-    print(f"   Success: {result['success']}")
-    if result["success"]:
-        print(f"   Rows: {result['row_count']}")
-        print(f"   Data: {result['data']}")
+    print(f"\n2. Authorization result: {result['status']}")
+    if result["status"] == "authorized":
+        print(f"   execution_id   : {result['execution_id']}")
+        print(f"   resource       : {result['resource']}")
+        print(f"   authorized fields: {result['fields']}")
+        print(f"   predicates     : {result['predicates']}")
+        print(f"   limit          : {result['limit']}")
+        print()
+        print("   → Pass this capability to YOUR connector for execution.")
+        print("     DataFence does NOT execute the query.")
     else:
-        print(f"   Error: {result['error']}")
-        print(f"   Reasons: {result['reasons']}")
+        print(f"   reasons: {result['reasons']}")
+
+    # Show denial path: requesting a disallowed operation
+    deny_args = json.dumps({"resource": "orders", "operation": "delete"})
+    denied_json = tool.handle_call(principal=principal, arguments_json=deny_args)
+    denied = json.loads(denied_json)
+    print(f"\n3. Denial example — status: {denied['status']}")
+    print(f"   reasons: {denied['reasons']}")
 
 
-def example_agent():
-    """Simple agent with OpenAI and DataFence."""
+# ---------------------------------------------------------------------------
+# Example B: live OpenAI call (requires OPENAI_API_KEY)
+# ---------------------------------------------------------------------------
+
+def example_with_live_openai() -> None:
+    """
+    Full end-to-end with a real OpenAI model.
+    Requires: pip install openai && export OPENAI_API_KEY=sk-...
+    """
     print("\n" + "=" * 60)
-    print("OpenAI Agent Example")
+    print("OpenAI DataFence Tool — live model call")
     print("=" * 60)
 
-    # Setup DataFence
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-    # Create agent (requires OPENAI_API_KEY env var)
     try:
-        agent = create_openai_agent(
-            fence,
-            model="gpt-4",
-            system_prompt="You are a banking assistant. Help users query their transaction data securely.",
+        import openai
+    except ImportError:
+        print("⚠️  openai package not installed: pip install openai")
+        return
+
+    boundary, _ = _make_boundary()
+    tool = DataFenceOpenAITool(boundary)
+
+    # Principal from your auth layer
+    principal = Principal(id="user:alice", tenant_id="tenant-acme")
+
+    client = openai.OpenAI()
+    messages = [{"role": "user", "content": "Show me my recent orders."}]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=[tool.openai_tool_spec()],
+            tool_choice="auto",
         )
 
-        # Use agent
-        actor = {"id": "agent:banking-assistant", "tenant_id": "acme", "customer_id": "cust_123"}
+        message = response.choices[0].message
+        for tc in message.tool_calls or []:
+            if tc.function.name == tool.tool_name:
+                result_json = tool.handle_call(
+                    principal=principal,
+                    arguments_json=tc.function.arguments,
+                )
+                result = json.loads(result_json)
+                print(f"\nModel requested: {tc.function.arguments}")
+                print(f"Authorization  : {result['status']}")
+                if result["status"] == "authorized":
+                    print(f"Capability     : execution_id={result['execution_id']}")
+                    print("→ Pass to your connector to retrieve data.")
+                else:
+                    print(f"Denied         : {result['reasons']}")
 
-        response = agent("Show me my recent transactions", actor=actor)
-
-        print(f"\nAgent response: {response}")
-
-    except ImportError:
-        print("\n⚠️  OpenAI package not installed")
-        print("Install with: pip install openai")
-    except Exception as e:
-        print(f"\n⚠️  Error: {e}")
-        print("Make sure OPENAI_API_KEY environment variable is set")
-
-
-def example_streaming():
-    """Streaming responses with function calls."""
-    print("\n" + "=" * 60)
-    print("OpenAI Streaming Example")
-    print("=" * 60)
-
-    connector = MemoryConnector(data=sample_data)
-    fence = DataFence.from_yaml("../../policies/banking.yaml", connector)
-
-    from datafence.integrations.openai_adapter import OpenAIStreamingAdapter
-
-    adapter = OpenAIStreamingAdapter(fence)
-
-    print("\nStreaming adapter created")
-    print("Use adapter.process_stream_chunk() to handle streaming responses")
-    print("See OpenAI streaming docs for full implementation")
+    except Exception as exc:
+        print(f"⚠️  OpenAI error: {exc}")
+        print("   Set OPENAI_API_KEY and try again.")
 
 
 if __name__ == "__main__":
-    # Run examples
-    example_manual()
-
+    example_direct_tool_call()
+    example_with_live_openai()
     print("\n" + "=" * 60)
-    print("\nTo run the agent example, set OPENAI_API_KEY and uncomment:")
-    print("# example_agent()")
-
-    example_streaming()
-
-    print("\n" + "=" * 60)
-    print("✓ Examples complete")
+    print("✓ Example complete")

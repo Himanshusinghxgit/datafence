@@ -42,10 +42,20 @@ The principal MUST be resolved from transport-level authentication context
 (e.g. a session token verified by the application), NOT from the agent's
 tool call arguments.  The agent must never be able to choose its own identity.
 
+``principal_resolver`` is REQUIRED.  There is no fallback.  A server without
+a configured resolver raises ``TypeError`` at construction time, making the
+misconfiguration impossible to miss.
+
 Usage::
 
     from datafence.mcp.server import DataFenceMCPServer
     from datafence.core.boundary import DataFenceBoundary
+    from datafence.core.principal import Principal
+
+    def my_auth_resolver(session_context: dict) -> Principal:
+        token = session_context["token"]
+        user = verify_token(token)   # application-owned
+        return Principal(id=user.id, tenant_id=user.tenant_id)
 
     boundary = DataFenceBoundary.create(
         policy_engine=engine,
@@ -67,7 +77,7 @@ from collections.abc import Callable
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor
+from datafence.core.principal import Principal
 from datafence.mcp.tool import DataFenceQueryTool, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -89,24 +99,34 @@ class DataFenceMCPServer:
         MCP server name advertised to clients.
     version : str
         Server version string.
-    principal_resolver : Callable
-        Required callable ``(authenticated_context: dict) -> Actor``. The
-        agent's JSON arguments and request metadata are never a principal.
+    principal_resolver : Callable[[dict], Principal]
+        **Required** callable that maps an authenticated session context dict
+        to a :class:`~datafence.core.principal.Principal`.
+
+        The context dict is supplied by the transport layer (e.g. extracted
+        from a verified JWT, session cookie, or mutual-TLS certificate).
+        It must NEVER come from the agent's tool call arguments.
+
+        Raises ``TypeError`` at construction time if not provided.
     """
 
     def __init__(
         self,
         boundary: DataFenceBoundary,
         server_name: str = "datafence",
-        version: str = "0.5.0",
-        principal_resolver: Callable[[dict], Actor] | None = None,
+        version: str = "1.0.0",
+        principal_resolver: Callable[[dict], Principal] | None = None,
     ) -> None:
+        if principal_resolver is None:
+            raise TypeError(
+                "DataFenceMCPServer requires a principal_resolver. "
+                "Provide a callable(session_context: dict) -> Principal "
+                "that resolves identity from your authenticated transport context. "
+                "The agent's JSON arguments must never be the source of identity."
+            )
         self.server_name = server_name
         self.version = version
-        # Direct callers must provide authenticated context. The legacy
-        # resolver below exists only for the pre-v1 Python API; raw MCP JSON
-        # never forwards its agent-controlled _session field.
-        self._principal_resolver = principal_resolver or self._legacy_direct_resolver
+        self._principal_resolver: Callable[[dict], Principal] = principal_resolver
 
         self._query_tool = DataFenceQueryTool(boundary=boundary)
         self._tools: dict[str, DataFenceQueryTool] = {self._query_tool.tool_name: self._query_tool}
@@ -142,16 +162,20 @@ class DataFenceMCPServer:
 
         Args:
             tool_name       : Name of the tool to invoke.
-            arguments       : Tool arguments from the agent.
-            session_context : Session metadata used to resolve the principal.
+            arguments       : Tool arguments from the agent (untrusted Intent).
+            session_context : Authenticated session metadata from the transport
+                              layer, used to resolve the Principal.
+                              This must NEVER come from agent-controlled JSON.
 
         Returns:
-            MCP-compatible response dict.
+            MCP-compatible response dict containing the authorization result.
+            An allowed response exposes the signed capability metadata only —
+            no database rows are returned here.
         """
         if tool_name not in self._tools:
             return self._error_response(f"Unknown tool: {tool_name!r}")
 
-        # Resolve principal
+        # Principal must come from authenticated transport context, not arguments.
         try:
             principal = self._resolve_principal(session_context or {})
         except Exception as exc:
@@ -168,9 +192,8 @@ class DataFenceMCPServer:
                         "type": "text",
                         "text": json.dumps(
                             {
-                                "status": "allowed",
-                                "row_count": result.row_count,
-                                "data": result.data,
+                                "status": "authorized",
+                                "capability": result.capability,
                                 "request_id": result.request_id,
                                 "evidence_id": result.evidence_id,
                             }
@@ -200,6 +223,11 @@ class DataFenceMCPServer:
         Dispatch a raw MCP JSON-RPC request dict.
 
         This is the main entry point for transport adapters.
+
+        Security note: The ``_session`` field sometimes present in MCP JSON
+        is agent-controlled and is intentionally ignored.  Transport adapters
+        must supply authenticated context via a separate, trusted channel and
+        call ``handle_call_tool`` directly with that context.
         """
         method = request.get("method", "")
         params = request.get("params", {})
@@ -209,12 +237,11 @@ class DataFenceMCPServer:
         elif method == "tools/list":
             result = self.handle_list_tools()
         elif method == "tools/call":
+            # Agent-provided _session field is not forwarded.
+            # Transport must inject authenticated session_context separately.
             result = self.handle_call_tool(
                 tool_name=params.get("name", ""),
                 arguments=params.get("arguments", {}),
-                # _session is agent-controlled JSON and is intentionally not
-                # trusted. Transport adapters must call handle_call_tool with
-                # an authenticated context obtained outside the MCP request.
                 session_context=None,
             )
         else:
@@ -230,28 +257,19 @@ class DataFenceMCPServer:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_principal(self, session_context: dict) -> Actor:
+    def _resolve_principal(self, session_context: dict) -> Principal:
         """
-        Resolve the authenticated principal from session context.
+        Resolve the authenticated Principal from transport session context.
 
-        The context must be supplied by a trusted transport adapter.
+        Validates that the resolver returns a proper Principal instance.
+        Raises TypeError if an incompatible type is returned.
         """
         principal = self._principal_resolver(session_context)
-        if not isinstance(principal, Actor):
-            raise TypeError("principal_resolver must return Actor")
+        if not isinstance(principal, Principal):
+            raise TypeError(
+                f"principal_resolver must return Principal, got {type(principal).__name__!r}"
+            )
         return principal
-
-    @staticmethod
-    def _legacy_direct_resolver(session_context: dict) -> Actor:
-        """Compatibility for direct Python callers; not used by raw MCP."""
-        principal_data = session_context.get("principal")
-        if not principal_data:
-            raise ValueError("authenticated principal context required")
-        return Actor(
-            id=principal_data["id"],
-            tenant_id=principal_data["tenant_id"],
-            metadata=principal_data.get("metadata", {}),
-        )
 
     @staticmethod
     def _error_response(message: str) -> dict[str, Any]:

@@ -19,11 +19,10 @@ from __future__ import annotations
 
 from secrets import token_bytes
 
-from datafence import Actor, CapabilityVerifier, DataFenceBoundary, Intent, Operation
-from datafence.connectors.memory_connector import InMemoryReferenceConnector
+from datafence import Actor, DataFenceBoundary, Intent, Operation
 from datafence.errors import PolicyDeniedError
-
 from examples.bank.policy import create_bank_policy
+from examples.reference_connector.memory import InMemoryReferenceConnector
 
 
 def separator(title: str) -> None:
@@ -89,7 +88,7 @@ def main() -> None:
     )
     authorized2 = fence.authorize(principal, intent_cross)
     result2 = connector.execute(authorized2)
-    print(f"  Policy enforced tenant_id = 'bank_a'")
+    print("  Policy enforced tenant_id = 'bank_a'")
     print(f"  Rows returned: {result2.row_count}  (bank_a rows only)")
     for row in result2.rows:
         assert row.get("tenant_id", "bank_a") == "bank_a", "TENANT ISOLATION BREACH"

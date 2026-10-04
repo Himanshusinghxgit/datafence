@@ -17,7 +17,6 @@ from datafence import (
     RowRule,
 )
 from datafence.core.resources import PredicateOperator
-
 from examples.bank.registry import create_bank_registry
 
 

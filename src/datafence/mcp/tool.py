@@ -19,12 +19,13 @@ Architecture::
                   (the caller's connector executes it, not DataFence)
 
 Security invariants:
-    - The Principal is provided by the MCP server from authenticated context,
-      never from the agent's tool call arguments.
+    - The Principal is resolved by the MCP server from authenticated transport
+      context, never from the agent's tool call arguments.
     - The agent controls: resource, fields, filters (all treated as untrusted Intent).
     - The policy controls: authorized fields, enforced row filters, row limits.
     - The agent cannot escalate beyond what the policy allows.
     - DataFence does not execute database operations; it only authorizes.
+    - principal_resolver is required on DataFenceMCPServer; no fallback exists.
 """
 
 from __future__ import annotations
@@ -33,7 +34,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from datafence.core.boundary import DataFenceBoundary
-from datafence.core.types import Actor, Intent, Operation
+from datafence.core.principal import Principal
+from datafence.core.types import Intent, Operation
 from datafence.errors import DataFenceError
 
 
@@ -137,17 +139,17 @@ class DataFenceQueryTool:
 
     def call(
         self,
-        principal: Actor,
+        principal: Principal,
         params: dict[str, Any],
     ) -> ToolResult:
         """
         Execute a tool call on behalf of *principal*.
 
         Args:
-            principal : Authenticated principal from the MCP server.
-                        The MCP server is responsible for authenticating
-                        the principal before calling this method.
-            params    : Tool call parameters from the agent.
+            principal : Authenticated Principal from the MCP server.
+                        The MCP server is responsible for resolving this
+                        from transport-level authentication context.
+            params    : Tool call parameters from the agent (untrusted Intent).
 
         Returns:
             ToolResult with data or denial reasons.
@@ -188,7 +190,7 @@ class DataFenceQueryTool:
                 "resource": capability.resource,
                 "operation": capability.operation.value,
                 "selected_fields": capability.selected_fields,
-                "enforced_predicates": capability.filter_constraints(),
+                "predicates": capability.filter_constraints(),
                 "limit": capability.limit,
                 "policy_version": capability.policy_version,
                 "expires_at": capability.expires_at.isoformat() if capability.expires_at else None,

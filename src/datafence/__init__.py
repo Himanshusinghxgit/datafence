@@ -142,13 +142,11 @@ from datafence.core.resources import (
 )
 
 # ---------------------------------------------------------------------------
-# Core types
+# Core types — internal request/decision types are NOT part of the public API
 # ---------------------------------------------------------------------------
 from datafence.core.types import (
-    Decision,
     Intent,
     Operation,
-    Request,
 )
 
 # ---------------------------------------------------------------------------
@@ -177,8 +175,6 @@ __all__ = [
     # ── Intent and operation ─────────────────────────────────────────────
     "Intent",
     "Operation",
-    "Request",
-    "Decision",
     # ── Typed predicate IR ───────────────────────────────────────────────
     "ResourceRef",
     "FieldRef",
