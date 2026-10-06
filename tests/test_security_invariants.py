@@ -1660,3 +1660,678 @@ class TestDataClassificationSemantics:
                 Principal("user:1", "tenant-a"),
                 Intent("customers", Operation.READ, fields=["id", "ssn"]),
             )
+
+
+# ===========================================================================
+# 11. Deep immutability — nested mutation must be impossible
+# ===========================================================================
+
+
+class TestDeepImmutabilityNested:
+    """
+    Prove that every security-relevant container inside AuthorizedExecution
+    and Principal is immutable at every depth.
+    """
+
+    def _cap(self) -> tuple[AuthorizedExecution, bytes]:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id", "name"]),
+        )
+        return cap, key
+
+    # ------------------------------------------------------------------
+    # predicates — tuple of MappingProxyType
+    # ------------------------------------------------------------------
+
+    def test_predicates_tuple_is_immutable(self) -> None:
+        cap, _ = self._cap()
+        assert isinstance(cap.predicates, tuple)
+        with pytest.raises((AttributeError, TypeError)):
+            cap.predicates.append({"field": "evil", "operator": "=", "value": "x"})  # type: ignore[union-attr]
+
+    def test_predicate_dict_cannot_be_mutated(self) -> None:
+        """cap.predicates[0]['value'] = 'attacker' must raise."""
+        cap, _ = self._cap()
+        p = cap.predicates[0]
+        with pytest.raises(TypeError):
+            p["value"] = "attacker"  # type: ignore[index]
+
+    def test_predicate_dict_key_cannot_be_deleted(self) -> None:
+        cap, _ = self._cap()
+        p = cap.predicates[0]
+        with pytest.raises(TypeError):
+            del p["field"]  # type: ignore[attr-defined]
+
+    def test_filter_constraints_returns_mutable_copy(self) -> None:
+        """filter_constraints() must return plain dicts for connector use,
+        but mutations to those copies must NOT affect the capability."""
+        cap, key = self._cap()
+        original_value = next(
+            c["value"] for c in cap.filter_constraints() if c["field"] == "tenant_id"
+        )
+        mutable_list = cap.filter_constraints()
+        mutable_list[0]["value"] = "evil-mutation"
+        # cap.predicates[0] must still hold the original value
+        assert cap.predicates[0]["value"] == original_value  # type: ignore[index]
+        assert cap.verify_signature(key)
+
+    # ------------------------------------------------------------------
+    # obligations — MappingProxyType
+    # ------------------------------------------------------------------
+
+    def test_obligations_cannot_be_mutated(self) -> None:
+        """cap.obligations['audit'] = False must raise."""
+        boundary, key, _ = _make_boundary()
+        # Build boundary with obligations
+        reg2 = ResourceRegistry()
+        reg2.register(ResourceDefinition(
+            "audited",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            },
+            supported_operations=("read",),
+        ))
+        from datafence.core.policy import RowRule
+        pol2 = DataFencePolicy("p2", "1", {"audited": ResourcePolicy(
+            "audited",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+            obligations={"audit": True, "notify": "compliance@example.com"},
+        )})
+        engine2 = DataFencePolicyEngine(pol2, registry=reg2)
+        b2 = DataFenceBoundary.create(engine2, reg2, token_bytes(32), capability_audience="test-service")
+        cap2 = b2.authorize(Principal("u", "t-a"), Intent("audited", Operation.READ))
+        assert cap2.obligations["audit"] is True  # type: ignore[index]
+        with pytest.raises(TypeError):
+            cap2.obligations["audit"] = False  # type: ignore[index]
+
+    def test_obligations_nested_value_immutable(self) -> None:
+        """Nested lists/dicts inside obligations must also be immutable."""
+        from datafence.core.policy import RowRule
+        reg3 = ResourceRegistry()
+        reg3.register(ResourceDefinition(
+            "nested_obl",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            },
+            supported_operations=("read",),
+        ))
+        pol3 = DataFencePolicy("p3", "1", {"nested_obl": ResourcePolicy(
+            "nested_obl",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+            obligations={"tags": ["pii", "audit"]},  # list value
+        )})
+        engine3 = DataFencePolicyEngine(pol3, registry=reg3)
+        b3 = DataFenceBoundary.create(engine3, reg3, token_bytes(32), capability_audience="test-service")
+        cap3 = b3.authorize(Principal("u", "t-a"), Intent("nested_obl", Operation.READ))
+        # The tags list inside obligations must be a tuple (deep-frozen)
+        tags = cap3.obligations["tags"]  # type: ignore[index]
+        assert isinstance(tags, tuple), f"Expected tuple, got {type(tags).__name__}"
+        with pytest.raises((AttributeError, TypeError)):
+            tags.append("evil")  # type: ignore[union-attr]
+
+    # ------------------------------------------------------------------
+    # Principal.attributes — MappingProxyType (nested)
+    # ------------------------------------------------------------------
+
+    def test_principal_attributes_top_level_immutable(self) -> None:
+        p = Principal("u", "t", attributes={"dept": "finance"})
+        with pytest.raises(TypeError):
+            p.attributes["dept"] = "evil"  # type: ignore[index]
+
+    def test_principal_attributes_nested_dict_immutable(self) -> None:
+        p = Principal("u", "t", attributes={"meta": {"x": 1}})
+        from types import MappingProxyType
+        assert isinstance(p.attributes["meta"], MappingProxyType)  # type: ignore[index]
+        with pytest.raises(TypeError):
+            p.attributes["meta"]["x"] = 99  # type: ignore[index]
+
+    def test_principal_attributes_nested_list_is_tuple(self) -> None:
+        p = Principal("u", "t", attributes={"tags": ["a", "b"]})
+        tags = p.attributes["tags"]  # type: ignore[index]
+        assert isinstance(tags, tuple), f"Expected tuple, got {type(tags).__name__}"
+        with pytest.raises((AttributeError, TypeError)):
+            tags.append("c")  # type: ignore[union-attr]
+
+    def test_principal_rejects_non_json_serialisable_attribute(self) -> None:
+        """datetime, object(), bytes in attributes must be rejected at construction."""
+        import datetime
+        with pytest.raises(ValueError, match="JSON-serialisable"):
+            Principal("u", "t", attributes={"ts": datetime.datetime.now()})
+
+    def test_principal_rejects_non_finite_float_attribute(self) -> None:
+        with pytest.raises(ValueError, match="non-finite"):
+            Principal("u", "t", attributes={"val": float("nan")})
+        with pytest.raises(ValueError, match="non-finite"):
+            Principal("u", "t", attributes={"val": float("inf")})
+
+    def test_principal_accepts_valid_json_attributes(self) -> None:
+        """All JSON-compatible types must be accepted."""
+        p = Principal("u", "t", attributes={
+            "str_val": "hello",
+            "int_val": 42,
+            "float_val": 3.14,
+            "bool_val": True,
+            "null_val": None,
+            "nested_dict": {"x": 1},
+            "nested_list": [1, 2, 3],
+        })
+        assert p.attributes["str_val"] == "hello"   # type: ignore[index]
+        assert p.attributes["float_val"] == 3.14   # type: ignore[index]
+
+    def test_selected_fields_cannot_be_mutated(self) -> None:
+        cap, _ = self._cap()
+        assert isinstance(cap.selected_fields, tuple)
+        with pytest.raises((AttributeError, TypeError)):
+            cap.selected_fields.append("injected")  # type: ignore[union-attr]
+
+    def test_policy_decisions_cannot_be_mutated(self) -> None:
+        cap, _ = self._cap()
+        assert isinstance(cap.policy_decisions, tuple)
+        with pytest.raises((AttributeError, TypeError)):
+            cap.policy_decisions.append("injected")  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# 12. Tenant isolation — strict semantic invariant
+# ===========================================================================
+
+
+class TestTenantIsolationSemantics:
+    """
+    The tenant isolation row rule must be exactly:
+        field == tenant_key  AND  operator == EQ  AND  value == ':actor_tenant_id'
+
+    Any deviation must be rejected at DataFenceBoundary.create() time.
+    """
+
+    def _reg_with_tenant(self) -> ResourceRegistry:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "items",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "value":     FieldDefinition("value", "string"),
+            },
+            supported_operations=("read",),
+        ))
+        return reg
+
+    def _make_engine(self, reg: ResourceRegistry, row_rules: list) -> DataFencePolicyEngine:
+        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "value"],
+            row_rules=row_rules,
+            max_rows=10,
+        )})
+        return DataFencePolicyEngine(pol, registry=reg)
+
+    def _should_fail(self, row_rules: list, match: str) -> None:
+        reg = self._reg_with_tenant()
+        engine = self._make_engine(reg, row_rules)
+        from datafence.errors import ConfigurationError
+        with pytest.raises(ConfigurationError, match=match):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    def _should_pass(self, row_rules: list) -> DataFenceBoundary:
+        reg = self._reg_with_tenant()
+        engine = self._make_engine(reg, row_rules)
+        return DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    # Correct invariant
+    def test_eq_actor_tenant_id_accepted(self) -> None:
+        from datafence.core.policy import RowRule
+        b = self._should_pass(
+            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
+        )
+        assert isinstance(b, DataFenceBoundary)
+
+    # Wrong operators
+    def test_neq_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.NEQ, ":actor_tenant_id")],
+            "EQ",
+        )
+
+    def test_lt_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.LT, ":actor_tenant_id")],
+            "EQ",
+        )
+
+    def test_lte_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.LTE, ":actor_tenant_id")],
+            "EQ",
+        )
+
+    def test_gt_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.GT, ":actor_tenant_id")],
+            "EQ",
+        )
+
+    def test_gte_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.GTE, ":actor_tenant_id")],
+            "EQ",
+        )
+
+    def test_in_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.IN, [":actor_tenant_id"])],
+            "EQ",
+        )
+
+    def test_not_in_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.NOT_IN, [":actor_tenant_id"])],
+            "EQ",
+        )
+
+    def test_is_null_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.IS_NULL, None)],
+            "EQ",
+        )
+
+    def test_is_not_null_operator_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.IS_NOT_NULL, None)],
+            "EQ",
+        )
+
+    # Wrong values
+    def test_literal_tenant_value_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.EQ, "hardcoded-tenant")],
+            ":actor_tenant_id",
+        )
+
+    def test_other_actor_attr_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_id")],
+            ":actor_tenant_id",
+        )
+
+    def test_old_alias_actor_dot_tenant_rejected(self) -> None:
+        """':actor.tenant_id' is no longer accepted — must use ':actor_tenant_id'."""
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.EQ, ":actor.tenant_id")],
+            ":actor_tenant_id",
+        )
+
+    def test_empty_value_rejected(self) -> None:
+        from datafence.core.policy import RowRule
+        self._should_fail(
+            [RowRule("tenant_id", PredicateOperator.EQ, "")],
+            ":actor_tenant_id",
+        )
+
+    def test_no_tenant_rule_rejected(self) -> None:
+        from datafence.errors import ConfigurationError
+        reg = self._reg_with_tenant()
+        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "value"],
+            row_rules=[],   # missing tenant rule
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        with pytest.raises(ConfigurationError, match="tenant"):
+            DataFenceBoundary.create(engine, reg, token_bytes(32))
+
+    def test_agent_filter_cannot_override_tenant_predicate(self) -> None:
+        """After boundary is created, agent-supplied tenant filter is overridden by policy."""
+        from datafence.core.policy import RowRule
+        b = self._should_pass(
+            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
+        )
+        cap = b.authorize(
+            Principal("u", "tenant-a"),
+            Intent("items", Operation.READ, filters={"tenant_id": "evil-tenant"}),
+        )
+        tenant_vals = [c["value"] for c in cap.filter_constraints() if c["field"] == "tenant_id"]
+        assert "evil-tenant" not in tenant_vals
+        assert "tenant-a" in tenant_vals
+
+    def test_tenant_predicate_tampering_detected_via_token(self) -> None:
+        """Tampering the tenant predicate in the CapabilityToken fails HMAC."""
+        from datafence.core.policy import RowRule
+        self._should_pass(
+            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
+        )
+        key_bytes = token_bytes(32)
+        # Need fresh boundary with known key
+        reg2 = self._reg_with_tenant()
+        pol2 = DataFencePolicy("p", "1", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id", "value"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine2 = DataFencePolicyEngine(pol2, registry=reg2)
+        b2 = DataFenceBoundary.create(engine2, reg2, key_bytes)
+        cap = b2.authorize(Principal("u", "tenant-a"), Intent("items", Operation.READ))
+        token_str = CapabilityToken.encode(cap)
+        data = json.loads(token_str)
+        data["predicates"] = [{"field": "tenant_id", "operator": "=", "value": "evil"}]
+        with pytest.raises(CapabilityVerificationError, match="signature"):
+            CapabilityVerifier(key_bytes).verify_token(json.dumps(data))
+
+
+# ===========================================================================
+# 13. REST API read-only contract
+# ===========================================================================
+
+
+class TestRESTReadOnly:
+    """
+    v0.1 REST API must reject INSERT / UPDATE / DELETE with 422.
+    Only READ is supported.
+    """
+
+    def _make_test_client(self):  # type: ignore[no-untyped-def]
+        """Create a TestClient for the DataFence API. Skip if fastapi/httpx not installed."""
+        try:
+            from fastapi.testclient import TestClient
+        except ImportError:
+            pytest.skip("fastapi not installed")
+
+        from datafence.api import create_api
+        from datafence.core.principal import Principal as P
+
+        boundary, _, _ = _make_boundary()
+
+        def resolver(credentials: Any) -> P:
+            return P(id="user:test", tenant_id="tenant-a")
+
+        app = create_api(boundary, principal_resolver=resolver)
+        return TestClient(app)
+
+    def test_read_operation_accepted(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers", "operation": "read", "fields": ["id"]},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "authorized"
+        assert "token" in data
+
+    def test_insert_rejected_422(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers", "operation": "insert"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 422
+
+    def test_update_rejected_422(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers", "operation": "update"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 422
+
+    def test_delete_rejected_422(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers", "operation": "delete"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 422
+
+    def test_unauthenticated_returns_403(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers"},
+            # no Authorization header
+        )
+        assert resp.status_code in (401, 403, 422)
+
+    def test_response_contains_capability_token(self) -> None:
+        """Authorized response must contain the signed token field."""
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "customers", "fields": ["id"]},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "token" in data
+        # Token must be parseable JSON with dfv field
+        token_data = json.loads(data["token"])
+        assert token_data["dfv"] == 1
+        assert "sig" in token_data
+
+    def test_unknown_resource_returns_403(self) -> None:
+        client = self._make_test_client()
+        resp = client.post(
+            "/authorize",
+            json={"resource": "nonexistent_table"},
+            headers={"Authorization": "Bearer test-token"},
+        )
+        assert resp.status_code == 403
+
+    def test_health_endpoint(self) -> None:
+        client = self._make_test_client()
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "healthy"
+
+
+# ===========================================================================
+# 14. CapabilityToken schema strictness
+# ===========================================================================
+
+
+class TestCapabilityTokenStrictness:
+    """
+    Malformed tokens must fail closed — rejected rather than silently coerced.
+    """
+
+    def _valid_token(self) -> tuple[str, bytes]:
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        return CapabilityToken.encode(cap), key
+
+    def _tamper(self, token: str, field: str, value: Any) -> str:
+        data = json.loads(token)
+        data[field] = value
+        return json.dumps(data)
+
+    def _delete(self, token: str, field: str) -> str:
+        data = json.loads(token)
+        del data[field]
+        return json.dumps(data)
+
+    # --- Missing required fields ---
+    def test_missing_execution_id_raises(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._delete(tok, "execution_id"))
+
+    def test_missing_sig_raises(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._delete(tok, "sig"))
+
+    def test_missing_audience_raises(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._delete(tok, "audience"))
+
+    def test_missing_nonce_raises(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._delete(tok, "nonce"))
+
+    def test_missing_expires_at_raises(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._delete(tok, "expires_at"))
+
+    # --- Wrong types (no silent coercion) ---
+    def test_limit_as_string_rejected(self) -> None:
+        """int(data['limit']) was a silent coercion — now must reject."""
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "limit", "999999"))
+
+    def test_limit_as_float_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "limit", 10.5))
+
+    def test_limit_zero_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "limit", 0))
+
+    def test_negative_limit_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "limit", -1))
+
+    def test_actor_id_as_int_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "actor_id", 12345))
+
+    def test_resource_as_int_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "resource", 99))
+
+    def test_selected_fields_not_list_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "selected_fields", "id,name"))
+
+    def test_selected_fields_with_int_element_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "selected_fields", [1, 2, 3]))
+
+    def test_predicates_not_list_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "predicates", "bad"))
+
+    def test_predicates_with_non_dict_element_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "predicates", ["not-a-dict"]))
+
+    def test_predicates_missing_field_key_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(
+                tok, "predicates", [{"operator": "=", "value": "x"}]
+            ))
+
+    def test_obligations_not_dict_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "obligations", ["audit"]))
+
+    def test_actor_roles_not_list_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "actor_roles", "admin"))
+
+    def test_actor_roles_with_non_str_element_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "actor_roles", [1, 2]))
+
+    def test_actor_attributes_not_dict_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "actor_attributes", ["dept"]))
+
+    # --- Invalid field values ---
+    def test_invalid_operation_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "operation", "hack"))
+
+    def test_invalid_sig_hex_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "sig", "not-hex!!"))
+
+    def test_empty_sig_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "sig", ""))
+
+    def test_invalid_date_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode(self._tamper(tok, "created_at", "not-a-date"))
+
+    # --- Malformed JSON ---
+    def test_non_json_string_rejected(self) -> None:
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode("this is not json")
+
+    def test_json_array_not_object_rejected(self) -> None:
+        with pytest.raises(CapabilityVerificationError):
+            CapabilityToken.decode('["a","b"]')
+
+    def test_wrong_dfv_version_rejected(self) -> None:
+        tok, _ = self._valid_token()
+        with pytest.raises(CapabilityVerificationError, match="version"):
+            CapabilityToken.decode(self._tamper(tok, "dfv", 99))
+
+    # --- Decoded capability deep-immutability ---
+    def test_decoded_token_predicates_are_frozen(self) -> None:
+        tok, key = self._valid_token()
+        cap = CapabilityVerifier(key, expected_audience="test-service").verify_token(tok)
+        if cap.predicates:
+            with pytest.raises(TypeError):
+                cap.predicates[0]["value"] = "evil"  # type: ignore[index]
+
+    def test_decoded_token_obligations_are_frozen(self) -> None:
+        tok, key = self._valid_token()
+        cap = CapabilityVerifier(key, expected_audience="test-service").verify_token(tok)
+        with pytest.raises(TypeError):
+            cap.obligations["injected"] = "x"  # type: ignore[index]

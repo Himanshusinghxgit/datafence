@@ -26,9 +26,73 @@ Deep immutability
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Attribute validation and deep-freeze helpers
+# ---------------------------------------------------------------------------
+
+def _validate_json_compatible_attrs(attrs: dict, path: str = "attributes") -> None:
+    """
+    Validate that ``attrs`` contains only JSON-compatible types.
+
+    Called at Principal construction so that signing never encounters a
+    surprise ``TypeError`` from ``json.dumps``.
+
+    Allowed leaf types: str, int, float (finite), bool, None.
+    Rejected: non-finite float, bytes, object(), datetime, set, …
+    """
+    for k, v in attrs.items():
+        if not isinstance(k, str):
+            raise ValueError(
+                f"Principal.{path} key must be str, got {type(k).__name__!r}"
+            )
+        _validate_json_value(v, f"{path}.{k}")
+
+
+def _validate_json_value(value: Any, path: str) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Principal.{path}: non-finite float {value!r} is not JSON-serialisable"
+            )
+        return
+    if isinstance(value, (str, int)):
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValueError(
+                    f"Principal.{path} key must be str, got {type(k).__name__!r}"
+                )
+            _validate_json_value(v, f"{path}.{k}")
+        return
+    if isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _validate_json_value(item, f"{path}[{i}]")
+        return
+    raise ValueError(
+        f"Principal.{path}: value of type {type(value).__name__!r} "
+        "is not JSON-serialisable"
+    )
+
+
+def _deep_freeze_attrs(value: Any) -> Any:
+    """Recursively make attribute values immutable."""
+    if isinstance(value, MappingProxyType):
+        return MappingProxyType({k: _deep_freeze_attrs(v) for k, v in value.items()})
+    if isinstance(value, dict):
+        return MappingProxyType({k: _deep_freeze_attrs(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze_attrs(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -74,11 +138,19 @@ class Principal:
         # Coerce roles to tuple for deep immutability
         if not isinstance(self.roles, tuple):
             object.__setattr__(self, "roles", tuple(self.roles))
-        # Coerce attributes to an immutable mapping proxy
-        if not isinstance(self.attributes, MappingProxyType):
-            object.__setattr__(
-                self, "attributes", MappingProxyType(dict(self.attributes))
-            )
+        # Coerce attributes to an immutable mapping proxy with deep-frozen values.
+        # Validate JSON-compatibility now so signing never raises a surprise TypeError.
+        raw_attrs = self.attributes
+        if isinstance(raw_attrs, MappingProxyType):
+            # Re-validate even if already proxied
+            _validate_json_compatible_attrs(dict(raw_attrs))
+            frozen_attrs = _deep_freeze_attrs(raw_attrs)
+        else:
+            if not isinstance(raw_attrs, dict):
+                raise ValueError("Principal.attributes must be a dict")
+            _validate_json_compatible_attrs(raw_attrs)
+            frozen_attrs = _deep_freeze_attrs(raw_attrs)
+        object.__setattr__(self, "attributes", frozen_attrs)
 
     # ------------------------------------------------------------------
     # Convenience helpers

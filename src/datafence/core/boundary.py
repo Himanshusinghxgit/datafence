@@ -149,30 +149,16 @@ def _validate_policy_against_registry(
                 "(must be positive)."
             )
 
-        # Tenant isolation check: if a resource has a tenant key,
-        # an allow-capable policy MUST include a tenant-bound row rule.
+        # Tenant isolation check — strict semantic invariant
         tenant_key = res_def.tenant_key()
-
-        # Only check if there's at least one ALLOW action
         from datafence.core.policy import ActionDecision
         has_allow_action = any(
             v == ActionDecision.ALLOW for v in rp.actions.values()
         )
-
         if tenant_key and has_allow_action:
-            # Check that a row rule exists that enforces tenant isolation
-            tenant_rules = [
-                r for r in rp.row_rules
-                if r.field == tenant_key and _is_tenant_bound_value(r.value)
-            ]
-            if not tenant_rules:
-                errors.append(
-                    f"Policy for {res_name!r} allows access to a tenant-scoped resource "
-                    f"(tenant key: {tenant_key!r}) but has no mandatory tenant isolation "
-                    "row rule (e.g. RowRule(tenant_key, EQ, ':actor_tenant_id')). "
-                    "Add a tenant row rule or mark the resource as global by removing "
-                    "is_tenant_key=True from its tenant field."
-                )
+            err = _validate_tenant_row_rule(rp, tenant_key, res_name)
+            if err:
+                errors.append(err)
 
     if errors:
         raise ConfigurationError(
@@ -182,10 +168,49 @@ def _validate_policy_against_registry(
 
 def _is_tenant_bound_value(value: Any) -> bool:
     """Return True if the row-rule value is a principal-bound tenant reference."""
-    return isinstance(value, str) and value in (
-        ":actor_tenant_id",
-        ":actor.tenant_id",
-    )
+    return isinstance(value, str) and value == ":actor_tenant_id"
+
+
+def _validate_tenant_row_rule(rp: ResourcePolicy, tenant_key: str, res_name: str) -> str | None:
+    """
+    Validate the tenant isolation row rule for *res_name*.
+
+    Returns an error string if invalid, or None if OK.
+    Requires exactly: field == tenant_key, operator == EQ, value == ":actor_tenant_id".
+    """
+    from datafence.core.resources import PredicateOperator
+
+    tenant_rules = [
+        r for r in rp.row_rules
+        if r.field == tenant_key
+    ]
+
+    if not tenant_rules:
+        return (
+            f"Policy for {res_name!r} allows access to a tenant-scoped resource "
+            f"(tenant key: {tenant_key!r}) but has no row rule on the tenant key field. "
+            "Add: RowRule(tenant_key, PredicateOperator.EQ, ':actor_tenant_id')"
+        )
+
+    for rule in tenant_rules:
+        # Operator must be EQ
+        if rule.operator != PredicateOperator.EQ:
+            return (
+                f"Policy for {res_name!r}: tenant isolation row rule on "
+                f"{tenant_key!r} must use operator EQ, got {rule.operator!r}. "
+                "Non-EQ operators on the tenant key do not provide mandatory isolation."
+            )
+        # Value must be the principal tenant reference
+        if not _is_tenant_bound_value(rule.value):
+            return (
+                f"Policy for {res_name!r}: tenant isolation row rule on "
+                f"{tenant_key!r} must use value ':actor_tenant_id', "
+                f"got {rule.value!r}. "
+                "Literal values and other actor references do not provide "
+                "per-principal tenant isolation."
+            )
+
+    return None
 
 
 # ---------------------------------------------------------------------------

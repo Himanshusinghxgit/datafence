@@ -50,9 +50,15 @@ from datafence.errors import DataFenceError
 # ---------------------------------------------------------------------------
 
 class AuthorizationRequest(BaseModel):  # type: ignore[misc]
-    """Untrusted Intent from the AI agent or API caller."""
+    """Untrusted Intent from the AI agent or API caller.
 
-    operation: str = Field(default="read", description="Operation type (currently: 'read').")
+    v0.1 only supports READ operations.
+    """
+
+    operation: str = Field(
+        default="read",
+        description="Operation type. v0.1 supports 'read' only.",
+    )
     resource: str = Field(..., description="Resource name to access.")
     fields: list[str] | None = Field(None, description="Fields to return.")
     filters: dict[str, Any] | None = Field(None, description="Agent-supplied row filters.")
@@ -62,13 +68,12 @@ class AuthorizationRequest(BaseModel):  # type: ignore[misc]
         @field_validator("operation")
         @classmethod
         def _validate_operation(cls, v: str) -> str:
-            allowed = {"read"}
-            if v.lower() not in allowed:
+            if v.lower() != "read":
                 raise ValueError(
                     f"Operation {v!r} is not supported in v0.1. "
-                    f"Supported operations: {sorted(allowed)}"
+                    "Only 'read' is supported."
                 )
-            return v.lower()
+            return "read"
 
         @field_validator("resource")
         @classmethod
@@ -228,10 +233,15 @@ def create_api(
         """
         try:
             op = Operation(request.operation.lower())
+            if op != Operation.READ:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Operation {request.operation!r} is not supported in v0.1. Only 'read' is supported.",
+                )
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unsupported operation: {request.operation!r}",
+                detail=f"Unknown operation: {request.operation!r}. Only 'read' is supported.",
             ) from None
 
         try:

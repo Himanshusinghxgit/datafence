@@ -19,8 +19,14 @@ HMAC signed fields (complete list)
 -----------------------------------
 execution_id, created_at, actor.id, actor.tenant_id, actor.roles,
 actor.attributes, resource, operation, selected_fields, predicates,
-limit, policy_version, policy_decisions, expires_at, audience, nonce,
-token_version (when serialized via CapabilityToken)
+limit, policy_version, policy_decisions, obligations, expires_at,
+audience, nonce.
+
+Note: ``dfv`` (the wire-format version tag) is checked before HMAC
+verification and is NOT itself part of the signed payload.  It acts as
+a schema-version guard (fail closed on unknown versions) rather than a
+security claim.  Changing ``dfv`` can prevent decoding but cannot forge
+a valid signature.
 
 Signing key requirements
 ------------------------
@@ -93,6 +99,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any
 from uuid import uuid4
 
@@ -136,12 +143,23 @@ def _safe_json(value: Any) -> str:
     """
     JSON-serialise *value*, rejecting non-finite numeric values.
 
-    Non-finite floats (NaN, Inf, -Inf) would produce ambiguous or
-    invalid JSON in some parsers, so we reject them explicitly.
+    Converts MappingProxyType → dict recursively before serialising,
+    so that json.dumps handles it correctly.
+    Non-finite floats (NaN, Inf, -Inf) are explicitly rejected.
     """
-    # Recursively check for non-finite numbers
     _reject_nonfinite(value)
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_to_jsonable(value), sort_keys=True, separators=(",", ":"))
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Recursively convert MappingProxyType / tuple to JSON-serialisable form."""
+    if isinstance(value, MappingProxyType):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, dict):
+        return {k: _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    return value
 
 
 def _reject_nonfinite(value: Any) -> None:
@@ -162,6 +180,70 @@ def _canon_predicates(predicates: tuple[dict[str, Any], ...]) -> str:
     serialised = [_safe_json(p) for p in predicates]
     return _safe_json(sorted(serialised))
 
+
+# ---------------------------------------------------------------------------
+# Deep-immutability helpers
+# ---------------------------------------------------------------------------
+
+def _validate_json_compatible(value: Any, path: str = "") -> None:
+    """
+    Raise ValueError if *value* contains types that cannot be JSON-serialised.
+
+    Validates at construction time so that signing never encounters a
+    surprise TypeError from json.dumps.
+
+    Allowed: str, int, float (finite), bool, None, dict, list, tuple.
+    Rejected: non-finite float, object(), datetime, bytes, set, …
+    """
+    if value is None or isinstance(value, bool):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(
+                f"Non-finite float at {path!r}: {value!r}"
+            )
+    elif isinstance(value, (str, int)):
+        return
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ValueError(
+                    f"Dict key at {path!r} must be str, got {type(k).__name__!r}"
+                )
+            _validate_json_compatible(v, f"{path}.{k}")
+    elif isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _validate_json_compatible(item, f"{path}[{i}]")
+    else:
+        raise ValueError(
+            f"Value at {path!r} of type {type(value).__name__!r} "
+            "is not JSON-serialisable and cannot be stored in a capability"
+        )
+
+
+def _deep_freeze(value: Any) -> Any:
+    """
+    Recursively convert mutable containers to their immutable equivalents.
+
+    dict  → MappingProxyType (with deep-frozen values)
+    list  → tuple (with deep-frozen elements)
+    tuple → tuple (with deep-frozen elements)
+    set   → frozenset
+    Everything else is returned unchanged (primitives are already immutable).
+
+    This guarantees that no nested mutable object survives inside
+    an ``AuthorizedExecution`` after issuance.
+    """
+    if isinstance(value, MappingProxyType):
+        # Already a proxy — re-freeze values in case they are mutable
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, dict):
+        return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(value)
+    return value  # str, int, float, bool, None, bytes — already immutable
 
 # ---------------------------------------------------------------------------
 # AuthorizedExecution — deeply immutable signed capability
@@ -209,7 +291,7 @@ class AuthorizedExecution:
 
     # Authorized access — immutable tuples, not lists
     selected_fields: tuple[str, ...]
-    predicates: tuple[dict[str, Any], ...] = ()
+    predicates: tuple[Any, ...] = ()   # tuple of MappingProxyType (deep-frozen dicts)
     limit: int = 0
 
     # Policy provenance — immutable tuples
@@ -219,7 +301,8 @@ class AuthorizedExecution:
     # Obligations — post-execution requirements from policy (e.g. {"audit": True}).
     # These are metadata for the connector/application; DataFence does not enforce them.
     # They ARE included in the HMAC to prevent stripping.
-    obligations: dict[str, Any] = field(default_factory=dict)
+    # Stored as a deep-frozen MappingProxyType — cannot be mutated after issuance.
+    obligations: Any = field(default_factory=dict)   # coerced to MappingProxyType
 
     # Capability lifecycle / audience binding
     expires_at: datetime | None = None
@@ -306,12 +389,13 @@ class AuthorizedExecution:
         return reference >= expires
 
     def filter_constraints(self) -> list[dict[str, Any]]:
-        """Return the typed predicate list as a defensive copy.
+        """Return the typed predicate list as a list of plain dicts (defensive copy).
 
         Each entry: ``{"field": str, "operator": str, "value": Any}``.
-        Connectors should compile row-filter clauses from this list.
+        Returns plain dicts (not MappingProxyType) for connector compatibility.
+        The returned list is a new object — mutating it has no effect on the capability.
         """
-        return list(self.predicates)
+        return [dict(p) for p in self.predicates]
 
     # ------------------------------------------------------------------
     # Deep-immutability helpers (defensive copies for public consumers)
@@ -364,11 +448,13 @@ class AuthorizedExecution:
             effective_expires = effective_expires.replace(tzinfo=timezone.utc)
         effective_nonce = nonce or uuid4().hex
 
-        # Convert to immutable tuples
+        # Convert to deeply immutable representations
         fields_tuple = tuple(selected_fields)
-        preds_tuple = tuple(dict(p) for p in enforced_predicates)
+        # Deep-freeze each predicate: dict → MappingProxyType (recursively)
+        preds_tuple = tuple(_deep_freeze(p) for p in enforced_predicates)
         decisions_tuple = tuple(policy_decisions)
-        obligations_dict = dict(obligations or {})
+        # Deep-freeze obligations: dict → MappingProxyType (recursively)
+        frozen_obligations = _deep_freeze(dict(obligations or {}))
 
         # Build unsigned first to compute signature
         unsigned = AuthorizedExecution(
@@ -382,7 +468,7 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=decisions_tuple,
-            obligations=obligations_dict,
+            obligations=frozen_obligations,
             expires_at=effective_expires,
             audience=audience,
             nonce=effective_nonce,
@@ -402,7 +488,7 @@ class AuthorizedExecution:
             limit=limit,
             policy_version=policy_version,
             policy_decisions=decisions_tuple,
-            obligations=obligations_dict,
+            obligations=frozen_obligations,
             expires_at=effective_expires,
             audience=audience,
             nonce=effective_nonce,
@@ -420,11 +506,22 @@ class AuthorizedExecution:
             raise ValueError("limit must be positive")
         if not self.audience:
             raise ValueError("audience cannot be empty")
-        # Coerce any accidental list/sequence to tuples for deep immutability
+        # Coerce selected_fields to tuple
         if not isinstance(self.selected_fields, tuple):
             object.__setattr__(self, "selected_fields", tuple(self.selected_fields))
-        if not isinstance(self.predicates, tuple):
-            object.__setattr__(self, "predicates", tuple(self.predicates))
+        # Deep-freeze predicates: tuple of MappingProxyType (nested immutable)
+        if not isinstance(self.predicates, tuple) or any(
+            isinstance(p, dict) for p in self.predicates
+        ):
+            object.__setattr__(
+                self,
+                "predicates",
+                tuple(_deep_freeze(p) for p in self.predicates),
+            )
+        # Deep-freeze obligations: MappingProxyType (nested immutable)
+        if not isinstance(self.obligations, MappingProxyType):
+            object.__setattr__(self, "obligations", _deep_freeze(self.obligations or {}))
+        # Coerce policy_decisions to tuple
         if not isinstance(self.policy_decisions, tuple):
             object.__setattr__(self, "policy_decisions", tuple(self.policy_decisions))
 
@@ -503,15 +600,15 @@ class CapabilityToken:
             "actor_id": capability.actor.id,
             "actor_tenant_id": capability.actor.tenant_id,
             "actor_roles": sorted(capability.actor.roles),
-            "actor_attributes": dict(sorted(capability.actor.attributes.items())),
+            "actor_attributes": _to_jsonable(dict(sorted(capability.actor.attributes.items()))),
             "resource": capability.resource,
             "operation": capability.operation.value,
             "selected_fields": sorted(capability.selected_fields),
-            "predicates": list(capability.predicates),
+            "predicates": _to_jsonable(list(capability.predicates)),
             "limit": capability.limit,
             "policy_version": capability.policy_version,
             "policy_decisions": list(capability.policy_decisions),
-            "obligations": dict(capability.obligations or {}),
+            "obligations": _to_jsonable(dict(capability.obligations or {})),
             "expires_at": _utc_iso(capability.expires_at) if capability.expires_at else "",
             "audience": capability.audience,
             "nonce": capability.nonce,
@@ -579,55 +676,170 @@ class CapabilityToken:
 
     @staticmethod
     def _reconstruct(data: dict[str, Any]) -> AuthorizedExecution:
-        """Reconstruct an AuthorizedExecution from a decoded wire dict."""
+        """Reconstruct an AuthorizedExecution from a decoded wire dict.
+
+        Fails closed: type mismatches and missing required fields raise ValueError
+        rather than silently coercing attacker-supplied data.
+        """
         from datafence.core.principal import Principal
+
+        # --- Require all mandatory fields ---
+        _required = [
+            "execution_id", "created_at", "actor_id", "actor_tenant_id",
+            "resource", "operation", "selected_fields", "limit",
+            "expires_at", "audience", "nonce", "sig",
+        ]
+        for key in _required:
+            if key not in data:
+                raise ValueError(f"token missing required field: {key!r}")
+
+        # --- Strict type validation (fail closed, no silent coercion) ---
+        def _require_str(key: str) -> str:
+            v = data[key]
+            if not isinstance(v, str):
+                raise ValueError(
+                    f"token field {key!r} must be str, got {type(v).__name__!r}"
+                )
+            return v
+
+        def _require_int(key: str) -> int:
+            v = data[key]
+            if not isinstance(v, int) or isinstance(v, bool):
+                raise ValueError(
+                    f"token field {key!r} must be int, got {type(v).__name__!r}"
+                )
+            return v
+
+        def _require_list(key: str) -> list:
+            v = data.get(key, [])
+            if not isinstance(v, list):
+                raise ValueError(
+                    f"token field {key!r} must be list, got {type(v).__name__!r}"
+                )
+            return v
 
         def _parse_dt(s: str | None) -> datetime | None:
             if not s:
                 return None
+            if not isinstance(s, str):
+                raise ValueError(f"datetime field must be str, got {type(s).__name__!r}")
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt
 
-        actor = Principal(
-            id=str(data["actor_id"]),
-            tenant_id=str(data["actor_tenant_id"]),
-            roles=tuple(str(r) for r in (data.get("actor_roles") or [])),
-            attributes=dict(data.get("actor_attributes") or {}),
-        )
+        execution_id = _require_str("execution_id")
+        resource = _require_str("resource")
+        actor_id = _require_str("actor_id")
+        actor_tenant_id = _require_str("actor_tenant_id")
+        operation_str = _require_str("operation")
+        audience = _require_str("audience")
+        nonce = _require_str("nonce")
+        policy_version = _require_str("policy_version") if "policy_version" in data else "unknown"
 
-        sig_hex = data.get("sig", "")
+        limit = _require_int("limit")
+        if limit <= 0:
+            raise ValueError(f"token field 'limit' must be positive, got {limit!r}")
+
+        # Roles: list of strings
+        actor_roles_raw = _require_list("actor_roles")
+        for i, r in enumerate(actor_roles_raw):
+            if not isinstance(r, str):
+                raise ValueError(
+                    f"actor_roles[{i}] must be str, got {type(r).__name__!r}"
+                )
+
+        # Attributes: must be a dict with string keys
+        actor_attrs_raw = data.get("actor_attributes") or {}
+        if not isinstance(actor_attrs_raw, dict):
+            raise ValueError(
+                f"actor_attributes must be dict, got {type(actor_attrs_raw).__name__!r}"
+            )
+        for k in actor_attrs_raw:
+            if not isinstance(k, str):
+                raise ValueError(
+                    f"actor_attributes key must be str, got {type(k).__name__!r}"
+                )
+
+        # selected_fields: list of strings
+        fields_raw = _require_list("selected_fields")
+        for i, f in enumerate(fields_raw):
+            if not isinstance(f, str):
+                raise ValueError(
+                    f"selected_fields[{i}] must be str, got {type(f).__name__!r}"
+                )
+
+        # predicates: list of dicts
+        preds_raw = _require_list("predicates")
+        for i, p in enumerate(preds_raw):
+            if not isinstance(p, dict):
+                raise ValueError(
+                    f"predicates[{i}] must be dict, got {type(p).__name__!r}"
+                )
+            for req_k in ("field", "operator"):
+                if not isinstance(p.get(req_k), str):
+                    raise ValueError(
+                        f"predicates[{i}].{req_k!r} must be str"
+                    )
+
+        # policy_decisions: list of strings
+        decisions_raw = _require_list("policy_decisions")
+        for i, d in enumerate(decisions_raw):
+            if not isinstance(d, str):
+                raise ValueError(
+                    f"policy_decisions[{i}] must be str, got {type(d).__name__!r}"
+                )
+
+        # obligations: dict with string keys
+        obls_raw = data.get("obligations") or {}
+        if not isinstance(obls_raw, dict):
+            raise ValueError(
+                f"obligations must be dict, got {type(obls_raw).__name__!r}"
+            )
+
+        # Signature: non-empty hex string
+        sig_hex = _require_str("sig")
         if not sig_hex:
             raise ValueError("token missing signature ('sig' field)")
-
         try:
-            sig_bytes = bytes.fromhex(str(sig_hex))
+            sig_bytes = bytes.fromhex(sig_hex)
         except ValueError as exc:
             raise ValueError(f"invalid hex signature: {exc}") from exc
+        if len(sig_bytes) == 0:
+            raise ValueError("signature is empty")
 
-        created_at = _parse_dt(data.get("created_at")) or datetime.now(timezone.utc)
-        expires_at = _parse_dt(data.get("expires_at"))
+        # Parse timestamps
+        created_at = _parse_dt(_require_str("created_at")) or datetime.now(timezone.utc)
+        expires_at = _parse_dt(data.get("expires_at"))  # may be empty string or absent
 
-        fields_raw = data.get("selected_fields") or []
-        preds_raw = data.get("predicates") or []
-        decisions_raw = data.get("policy_decisions") or []
+        # Parse operation enum — reject unknown values
+        try:
+            operation = Operation(operation_str)
+        except ValueError:
+            raise ValueError(f"unknown operation value: {operation_str!r}") from None
+
+        actor = Principal(
+            id=actor_id,
+            tenant_id=actor_tenant_id,
+            roles=tuple(actor_roles_raw),
+            attributes=actor_attrs_raw,
+        )
 
         return AuthorizedExecution(
-            execution_id=str(data["execution_id"]),
+            execution_id=execution_id,
             created_at=created_at,
             actor=actor,
-            resource=str(data["resource"]),
-            operation=Operation(str(data["operation"])),
-            selected_fields=tuple(str(f) for f in fields_raw),
-            predicates=tuple(dict(p) for p in preds_raw),
-            limit=int(data["limit"]),
-            policy_version=str(data.get("policy_version", "unknown")),
-            policy_decisions=tuple(str(d) for d in decisions_raw),
-            obligations=dict(data.get("obligations") or {}),
+            resource=resource,
+            operation=operation,
+            selected_fields=tuple(fields_raw),
+            predicates=tuple(preds_raw),       # __post_init__ will deep-freeze
+            limit=limit,
+            policy_version=policy_version,
+            policy_decisions=tuple(decisions_raw),
+            obligations=obls_raw,              # __post_init__ will deep-freeze
             expires_at=expires_at,
-            audience=str(data.get("audience", "datafence")),
-            nonce=str(data.get("nonce", "")),
+            audience=audience,
+            nonce=nonce,
             signature=sig_bytes,
         )
 
