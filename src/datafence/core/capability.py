@@ -33,6 +33,35 @@ Signing key requirements
 Minimum 32 bytes (256 bits) for HMAC-SHA256.  ``DataFenceBoundary.create()``
 and ``CapabilityVerifier`` both enforce this.
 
+Nonce and replay semantics
+--------------------------
+Each capability carries a cryptographically random ``nonce`` (UUID hex)
+included in the HMAC.
+
+v0.1 capabilities are **bearer capabilities** — stateless and valid until
+``expires_at`` (default 5 minutes) for any holder.
+
+What the nonce provides:
+  - Uniqueness: every issuance event has a distinct identifier
+  - Audit correlation: ``execution_id`` + ``nonce`` identify one issuance
+  - Replay detection enablement: connectors may record consumed nonces
+
+What the nonce does NOT provide alone:
+  - Single-use enforcement — DataFence core is intentionally stateless
+  - Within-TTL replay prevention — the connector must maintain a nonce store
+
+Connector-side single-use enforcement (optional, recommended)::
+
+    class MyConnector:
+        def execute(self, capability):
+            self._verifier.verify(capability)
+            if capability.nonce in self._used_nonces:
+                raise ReplayError(f\"Nonce {capability.nonce!r} already consumed\")
+            self._used_nonces.add(capability.nonce)
+            # ... execute backend query ...
+
+See docs/threat-model.md Threat Model B2 for the full documented interface.
+
 Shared-key trust model (IMPORTANT)
 -----------------------------------
 The current implementation uses HMAC-SHA256 with a **shared secret key**.

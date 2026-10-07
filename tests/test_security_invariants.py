@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+# Additional imports for boundary validation and nonce tests
 from datafence import (
     MIN_KEY_BYTES,
     ActionDecision,
@@ -36,6 +37,7 @@ from datafence import (
     CapabilityToken,
     CapabilityVerificationError,
     CapabilityVerifier,
+    DataClassification,
     DataFenceBoundary,
     DataFencePolicy,
     DataFencePolicyEngine,
@@ -49,7 +51,8 @@ from datafence import (
     RowRule,
     YAMLPolicyLoader,
 )
-from datafence.core.resources import PredicateOperator
+from datafence.core.policy import PolicyDecision, PolicyEffect
+from datafence.core.resources import FieldRef, Filter, Predicate, PredicateOperator, RowLimit
 from datafence.errors import ConfigurationError, PolicyDeniedError, PolicyError
 from examples.reference_connector.memory import InMemoryReferenceConnector
 
@@ -2335,3 +2338,492 @@ class TestCapabilityTokenStrictness:
         cap = CapabilityVerifier(key, expected_audience="test-service").verify_token(tok)
         with pytest.raises(TypeError):
             cap.obligations["injected"] = "x"  # type: ignore[index]
+
+
+
+# ===========================================================================
+# 15. Boundary-level decision validation — malicious PolicyEngine
+# ===========================================================================
+
+
+class _MaliciousBoundaryFixtures:
+    """Shared helpers for building boundaries with a custom engine."""
+
+    @staticmethod
+    def _reg() -> ResourceRegistry:
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "orders",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "total":     FieldDefinition("total", "decimal"),
+                "secret":    FieldDefinition(
+                    "secret", "string",
+                    classification=DataClassification.RESTRICTED,
+                ),
+            },
+            supported_operations=("read",),
+        ))
+        return reg
+
+    @staticmethod
+    def _boundary_with_engine(engine: object, reg: ResourceRegistry) -> DataFenceBoundary:
+        """Bypass DataFenceBoundary.create() compile-time validation so we can
+        test the runtime boundary-level decision validation with arbitrary engines."""
+        key = token_bytes(32)
+        reg.freeze()
+        b = DataFenceBoundary.__new__(DataFenceBoundary)
+        b.policy_engine = engine         # type: ignore[assignment]
+        b._registry = reg
+        b._signing_key = key
+        b._capability_ttl_seconds = 300
+        b._capability_audience = "test"
+        return b
+
+    @classmethod
+    def _make(cls, engine: object) -> DataFenceBoundary:
+        reg = cls._reg()
+        engine._registry = reg           # type: ignore[attr-defined]
+        return cls._boundary_with_engine(engine, reg)
+
+
+def _allow_decision(
+    allowed_fields: list[str],
+    predicates: tuple[Predicate, ...],
+    row_limit: int = 10,
+) -> PolicyDecision:
+    """Build a crafted ALLOW PolicyDecision."""
+    return PolicyDecision.allow(
+        allowed_fields=allowed_fields,
+        enforced_filter=Filter(predicates=predicates),
+        row_limit=RowLimit(row_limit),
+        policy_name="test",
+        policy_version="1.0",
+    )
+
+
+class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
+    """
+    Prove that DataFenceBoundary independently validates the PolicyDecision
+    before signing any capability.  A malicious or buggy custom PolicyEngine
+    cannot bypass registry security invariants.
+    """
+
+    # ------------------------------------------------------------------
+    # Invariant 1+2: allowed_fields — RESTRICTED and unknown fields
+    # ------------------------------------------------------------------
+
+    def test_restricted_field_in_allowed_fields_blocked(self) -> None:
+        """A PolicyEngine returning a RESTRICTED field must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id", "secret"],   # 'secret' is RESTRICTED
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="RESTRICTED"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_unknown_field_in_allowed_fields_blocked(self) -> None:
+        """A PolicyEngine returning a field not in the registry must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id", "nonexistent_field"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="not in\nregistry|not in registry"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_multiple_unauthorized_fields_all_blocked(self) -> None:
+        """Multiple bad fields in one decision — all rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["ghost1", "ghost2", "secret"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 4+5: enforced_filter — unknown and RESTRICTED fields
+    # ------------------------------------------------------------------
+
+    def test_restricted_field_in_enforced_filter_blocked(self) -> None:
+        """A PolicyEngine using a RESTRICTED field in the filter must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (
+                        Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),
+                        Predicate(FieldRef("secret"), PredicateOperator.EQ, "x"),  # RESTRICTED!
+                    ),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="RESTRICTED"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_unknown_field_in_enforced_filter_blocked(self) -> None:
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (
+                        Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),
+                        Predicate(FieldRef("ghost"), PredicateOperator.EQ, "x"),
+                    ),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="unknown"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 5: missing tenant predicate
+    # ------------------------------------------------------------------
+
+    def test_missing_tenant_predicate_blocked(self) -> None:
+        """A PolicyEngine omitting the mandatory tenant predicate must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (),   # no predicates at all — missing tenant isolation
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="tenant"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_cross_tenant_filter_blocked(self) -> None:
+        """A PolicyEngine injecting another tenant's ID must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, "evil-tenant"),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="tenant_id|cross-tenant|tenant"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_wrong_tenant_filter_operator_neq_blocked(self) -> None:
+        """A NEQ tenant predicate must be rejected even with the correct tenant_id."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.NEQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="EQ|operator"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_wrong_tenant_filter_operator_gt_blocked(self) -> None:
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.GT, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="EQ|operator"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_wrong_tenant_filter_operator_in_blocked(self) -> None:
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (Predicate(
+                        FieldRef("tenant_id"), PredicateOperator.IN, [principal.tenant_id]
+                    ),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="EQ|operator"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 7 / operation check
+    # ------------------------------------------------------------------
+
+    def test_unsupported_operation_in_request_blocked(self) -> None:
+        """Even if the engine returns ALLOW for an unsupported op, boundary rejects."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    ["id"],
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        # registry only supports 'read' — INSERT must be caught at registry validate_intent
+        # but if a custom engine bypassed that, the boundary catches it
+        with pytest.raises((PolicyDeniedError, PolicyError)):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.INSERT))
+
+    # ------------------------------------------------------------------
+    # Invariant 12: malformed decision fields
+    # ------------------------------------------------------------------
+
+    def test_empty_allowed_fields_in_allow_decision_blocked(self) -> None:
+        """An ALLOW decision with empty allowed_fields must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return _allow_decision(
+                    [],   # empty!
+                    (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="empty"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_zero_row_limit_in_decision_blocked(self) -> None:
+        """An ALLOW decision with row_limit=0 must be rejected."""
+        class EvilEngine:
+            @property
+            def registry(self) -> Any:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                from datafence.core.resources import RowLimit as RL
+                # Bypass RowLimit's own positive-check by patching value via object.__setattr__
+                rl = object.__new__(RL)
+                object.__setattr__(rl, "value", 0)
+                from datafence.core.policy import PolicyDecision
+                return PolicyDecision(
+                    effect=PolicyEffect.ALLOW,
+                    allowed_fields=("id",),
+                    enforced_filter=Filter(predicates=(
+                        Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),
+                    )),
+                    row_limit=rl,
+                    policy_name="bad",
+                    policy_version="1.0",
+                )
+
+        b = self._make(EvilEngine())
+        with pytest.raises(PolicyError, match="row_limit|positive"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Happy path — a correct engine still works after validation
+    # ------------------------------------------------------------------
+
+    def test_correct_engine_still_authorized(self) -> None:
+        """After all the malicious engine tests, a correct engine still works."""
+        boundary, key, _ = _make_boundary()
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id", "name"]),
+        )
+        assert isinstance(cap, AuthorizedExecution)
+        CapabilityVerifier(key, expected_audience="test-service").verify(cap)
+
+    def test_boundary_validation_does_not_double_count_tenant_for_non_tenant_resource(
+        self,
+    ) -> None:
+        """Resources with no tenant key do not require a tenant predicate."""
+
+        reg2 = ResourceRegistry()
+        reg2.register(ResourceDefinition(
+            "config",
+            fields={"key": FieldDefinition("key", "string")},
+            supported_operations=("read",),
+        ))
+        pol2 = DataFencePolicy("p", "1", {"config": ResourcePolicy(
+            "config",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["key"],
+            row_rules=[],   # no tenant key → no tenant row rule required
+            max_rows=10,
+        )})
+        engine2 = DataFencePolicyEngine(pol2, registry=reg2)
+        key2 = token_bytes(32)
+        b2 = DataFenceBoundary.create(engine2, reg2, key2)
+        cap2 = b2.authorize(Principal("u", "t"), Intent("config", Operation.READ))
+        assert isinstance(cap2, AuthorizedExecution)
+
+
+# ===========================================================================
+# 16. Nonce and replay semantics
+# ===========================================================================
+
+
+class TestNonceAndReplaySemantics:
+    """
+    Verify the documented v0.1 nonce semantics:
+    - Each issuance has a unique nonce
+    - Nonce is included in HMAC (tampering detected)
+    - Capability is a bearer token (stateless) — valid until expires_at
+    - Replay within TTL is explicitly the connector's responsibility
+    """
+
+    def _cap(self, ttl: int = 300) -> tuple[AuthorizedExecution, bytes]:
+        boundary, key, _ = _make_boundary(ttl=ttl)
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"),
+            Intent("customers", Operation.READ, ["id"]),
+        )
+        return cap, key
+
+    def test_each_issuance_has_unique_nonce(self) -> None:
+        boundary, _, _ = _make_boundary()
+        p = Principal("user:1", "tenant-a")
+        i = Intent("customers", Operation.READ, ["id"])
+        c1 = boundary.authorize(p, i)
+        c2 = boundary.authorize(p, i)
+        assert c1.nonce != c2.nonce, "Each issuance must have a unique nonce"
+        assert c1.execution_id != c2.execution_id
+
+    def test_nonce_is_non_empty_string(self) -> None:
+        cap, _ = self._cap()
+        assert isinstance(cap.nonce, str)
+        assert len(cap.nonce) >= 16, "Nonce should be a substantial random string"
+
+    def test_nonce_is_hmac_signed(self) -> None:
+        """Tampering with the nonce invalidates the HMAC."""
+        cap, key = self._cap()
+        import dataclasses
+        tampered = dataclasses.replace(cap, nonce="replayed-nonce-0000")
+        assert not tampered.verify_signature(key)
+
+    def test_nonce_tamper_in_token_detected(self) -> None:
+        cap, key = self._cap()
+        token_str = CapabilityToken.encode(cap)
+        data = json.loads(token_str)
+        data["nonce"] = "replayed"
+        with pytest.raises(CapabilityVerificationError, match="signature"):
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(
+                json.dumps(data)
+            )
+
+    def test_capability_is_bearer_until_expiry(self) -> None:
+        """A valid unexpired capability verifies without any nonce store."""
+        cap, key = self._cap(ttl=300)
+        verifier = CapabilityVerifier(key, expected_audience="test-service")
+        # Can be verified multiple times — it is a bearer token
+        verifier.verify(cap)
+        verifier.verify(cap)   # second call — still valid (no nonce store)
+
+    def test_expired_capability_rejected(self) -> None:
+        """Expiry is enforced — an expired capability cannot be replayed."""
+        import dataclasses
+        from datetime import timedelta, timezone
+        cap, key = self._cap(ttl=300)
+        expired = dataclasses.replace(
+            cap, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+        )
+        with pytest.raises(CapabilityVerificationError, match="expired"):
+            CapabilityVerifier(key, expected_audience="test-service").verify(expired)
+
+    def test_audience_prevents_cross_service_replay(self) -> None:
+        """Audience binding prevents a captured token from being used elsewhere."""
+        cap, key = self._cap()
+        with pytest.raises(CapabilityVerificationError, match="audience"):
+            CapabilityVerifier(key, expected_audience="different-service").verify(cap)
+
+    def test_connector_side_nonce_store_pattern(self) -> None:
+        """
+        Verify the documented connector-side replay-protection pattern works.
+        DataFence core is stateless; this tests the interface the connector should
+        implement, not a DataFence feature.
+        """
+        cap, key = self._cap(ttl=300)
+
+        # Simulate a minimal connector nonce store
+        used_nonces: set[str] = set()
+
+        def execute_with_replay_protection(capability: AuthorizedExecution) -> str:
+            """Simulate connector.execute() with nonce tracking."""
+            CapabilityVerifier(key, expected_audience="test-service").verify(capability)
+            if capability.nonce in used_nonces:
+                raise RuntimeError(f"Replay detected: nonce {capability.nonce!r}")
+            used_nonces.add(capability.nonce)
+            return "ok"
+
+        # First use: succeeds
+        result = execute_with_replay_protection(cap)
+        assert result == "ok"
+
+        # Second use with same capability: replay detected
+        with pytest.raises(RuntimeError, match="Replay"):
+            execute_with_replay_protection(cap)
+
+    def test_different_capabilities_have_different_nonces(self) -> None:
+        """Even two authorizations with the same principal/intent produce different nonces."""
+        boundary, key, _ = _make_boundary()
+        p = Principal("user:1", "tenant-a")
+        i = Intent("customers", Operation.READ, ["id"])
+        nonces = {boundary.authorize(p, i).nonce for _ in range(10)}
+        assert len(nonces) == 10, "All 10 issuances must have distinct nonces"
+
+    def test_nonce_included_in_capability_token(self) -> None:
+        cap, _ = self._cap()
+        token_str = CapabilityToken.encode(cap)
+        data = json.loads(token_str)
+        assert "nonce" in data
+        assert data["nonce"] == cap.nonce
