@@ -2349,6 +2349,12 @@ class TestCapabilityTokenStrictness:
 class _MaliciousBoundaryFixtures:
     """Shared helpers for building boundaries with a custom engine."""
 
+    # Default authoritative policy used by malicious engine tests.
+    # This is registered at boundary-creation time. Evil engines try to
+    # bypass it by returning decisions that violate these constraints.
+    _DEFAULT_POLICY_NAME = "test-policy"
+    _DEFAULT_POLICY_VERSION = "1.0"
+
     @staticmethod
     def _reg() -> ResourceRegistry:
         reg = ResourceRegistry()
@@ -2367,39 +2373,57 @@ class _MaliciousBoundaryFixtures:
         ))
         return reg
 
-    @staticmethod
-    def _boundary_with_engine(engine: object, reg: ResourceRegistry) -> DataFenceBoundary:
-        """Bypass DataFenceBoundary.create() compile-time validation so we can
-        test the runtime boundary-level decision validation with arbitrary engines."""
-        key = token_bytes(32)
-        reg.freeze()
-        b = DataFenceBoundary.__new__(DataFenceBoundary)
-        b.policy_engine = engine         # type: ignore[assignment]
-        b._registry = reg
-        b._signing_key = key
-        b._capability_ttl_seconds = 300
-        b._capability_audience = "test"
-        return b
+    @classmethod
+    def _authoritative_policy(cls, allowed_fields: list[str] | None = None) -> DataFencePolicy:
+        """Return the authoritative policy the boundary will enforce."""
+        from datafence.core.policy import RowRule
+        return DataFencePolicy(
+            cls._DEFAULT_POLICY_NAME,
+            cls._DEFAULT_POLICY_VERSION,
+            {"orders": ResourcePolicy(
+                "orders",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=allowed_fields or ["id", "tenant_id"],
+                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                max_rows=50,
+            )},
+        )
 
     @classmethod
-    def _make(cls, engine: object) -> DataFenceBoundary:
+    def _make(cls, engine: object, allowed_fields: list[str] | None = None) -> DataFenceBoundary:
+        """Build a boundary with a custom engine and an explicit authoritative policy."""
         reg = cls._reg()
-        engine._registry = reg           # type: ignore[attr-defined]
-        return cls._boundary_with_engine(engine, reg)
+        engine._registry = reg  # type: ignore[attr-defined]
+        auth_policy = cls._authoritative_policy(allowed_fields)
+        key = token_bytes(32)
+        # Use create() with authoritative_policy so _frozen_policy is always set.
+        return DataFenceBoundary.create(
+            engine,  # type: ignore[arg-type]
+            reg,
+            key,
+            capability_audience="test",
+            authoritative_policy=auth_policy,
+        )
 
 
 def _allow_decision(
     allowed_fields: list[str],
     predicates: tuple[Predicate, ...],
     row_limit: int = 10,
+    resource: str = "orders",
+    operation: str = "read",
+    policy_name: str = "test-policy",
+    policy_version: str = "1.0",
 ) -> PolicyDecision:
-    """Build a crafted ALLOW PolicyDecision."""
+    """Build a crafted ALLOW PolicyDecision with required provenance."""
     return PolicyDecision.allow(
         allowed_fields=allowed_fields,
         enforced_filter=Filter(predicates=predicates),
         row_limit=RowLimit(row_limit),
-        policy_name="test",
-        policy_version="1.0",
+        policy_name=policy_name,
+        policy_version=policy_version,
+        decision_resource=resource,
+        decision_operation=operation,
     )
 
 
@@ -2827,3 +2851,543 @@ class TestNonceAndReplaySemantics:
         data = json.loads(token_str)
         assert "nonce" in data
         assert data["nonce"] == cap.nonce
+
+
+# ===========================================================================
+# 17. Policy field ceiling, row-limit ceiling, and provenance enforcement
+# ===========================================================================
+
+
+class TestPolicyCeilingAndProvenance(_MaliciousBoundaryFixtures):
+    """
+    Prove that DataFenceBoundary enforces the policy-defined ceilings for
+    field access and row limits, and validates decision provenance.
+    These invariants hold even when a custom PolicyEngine bypasses the
+    built-in DataFencePolicyEngine.
+    """
+
+    @staticmethod
+    def _frozen_boundary(
+        policy_fields: list[str],
+        max_rows: int = 10,
+    ) -> tuple[DataFenceBoundary, ResourceRegistry]:
+        """Build a fully frozen boundary with a single 'orders' resource."""
+        from datafence.core.policy import RowRule
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "orders",
+            fields={
+                "id":        FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "email":     FieldDefinition("email", "string"),
+                "total":     FieldDefinition("total", "decimal"),
+            },
+            supported_operations=("read",),
+        ))
+        pol = DataFencePolicy("my-policy", "2.0", {"orders": ResourcePolicy(
+            "orders",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=policy_fields,
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=max_rows,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(engine, reg, key, capability_audience="test")
+        return b, reg
+
+    @staticmethod
+    def _evil_engine(
+        reg: ResourceRegistry,
+        allowed_fields: list[str],
+        row_limit_val: int = 5,
+        policy_name: str = "my-policy",
+        policy_version: str = "2.0",
+        decision_resource: str = "orders",
+        decision_operation: str = "read",
+    ) -> object:
+        """Build a minimal evil engine that returns a crafted ALLOW decision."""
+        from datafence.core.policy import PolicyDecision
+        from datafence.core.resources import (
+            FieldRef,
+            Filter,
+            Predicate,
+            PredicateOperator,
+            RowLimit,
+        )
+
+        class _EvilEngine:
+            def __init__(self, r: ResourceRegistry) -> None:
+                self._registry = r
+
+            @property
+            def registry(self) -> ResourceRegistry:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                return PolicyDecision.allow(
+                    allowed_fields=allowed_fields,
+                    enforced_filter=Filter(predicates=(
+                        Predicate(
+                            FieldRef("tenant_id"),
+                            PredicateOperator.EQ,
+                            principal.tenant_id,
+                        ),
+                    )),
+                    row_limit=RowLimit(row_limit_val),
+                    policy_name=policy_name,
+                    policy_version=policy_version,
+                    decision_resource=decision_resource,
+                    decision_operation=decision_operation,
+                )
+
+        return _EvilEngine(reg)
+
+    # ------------------------------------------------------------------
+    # Field ceiling
+    # ------------------------------------------------------------------
+
+    def test_policy_unauthorized_known_field_blocked(self) -> None:
+        """
+        policy allows: ['id']
+        custom engine returns: ['id', 'email']
+        → DataFenceBoundary MUST reject — email is not in the policy ceiling.
+        """
+        b, reg = self._frozen_boundary(["id"], max_rows=10)
+        b.policy_engine = self._evil_engine(reg, ["id", "email"])  # type: ignore[assignment]
+        with pytest.raises(PolicyError, match="policy ceiling|not permitted"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_policy_ceiling_single_extra_field_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id", "total"], max_rows=10)
+        # engine returns a field that exists in registry but not in policy
+        b.policy_engine = self._evil_engine(reg, ["id", "total", "email"])  # type: ignore[assignment]
+        with pytest.raises(PolicyError, match="policy ceiling|not permitted"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_policy_ceiling_all_valid_fields_allowed(self) -> None:
+        """A correct engine returning exactly the policy fields is allowed."""
+        b, reg = self._frozen_boundary(["id", "total"])
+        # Default engine is correct — no substitution
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+    # ------------------------------------------------------------------
+    # Row-limit ceiling
+    # ------------------------------------------------------------------
+
+    def test_excessive_row_limit_blocked(self) -> None:
+        """
+        policy max_rows = 10
+        custom engine returns row_limit = 1000
+        → DataFenceBoundary MUST reject.
+        """
+        b, reg = self._frozen_boundary(["id"], max_rows=10)
+        b.policy_engine = self._evil_engine(reg, ["id"], row_limit_val=1000)  # type: ignore[assignment]
+        with pytest.raises(PolicyError, match="max_rows|row_limit"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_row_limit_at_ceiling_allowed(self) -> None:
+        """row_limit == max_rows is exactly the ceiling — should be accepted."""
+        b, reg = self._frozen_boundary(["id"], max_rows=10)
+        b.policy_engine = self._evil_engine(reg, ["id"], row_limit_val=10)  # type: ignore[assignment]
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+    def test_row_limit_below_ceiling_allowed(self) -> None:
+        b, reg = self._frozen_boundary(["id"], max_rows=50)
+        b.policy_engine = self._evil_engine(reg, ["id"], row_limit_val=5)  # type: ignore[assignment]
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        assert cap.limit == 5
+
+    def test_row_limit_one_above_ceiling_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id"], max_rows=10)
+        b.policy_engine = self._evil_engine(reg, ["id"], row_limit_val=11)  # type: ignore[assignment]
+        with pytest.raises(PolicyError, match="max_rows|row_limit"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Decision/resource mismatch
+    # ------------------------------------------------------------------
+
+    def test_decision_resource_mismatch_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], decision_resource="evil_table"
+        )
+        with pytest.raises(PolicyError, match="decision_resource|resource"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_decision_resource_matches_request_allowed(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], decision_resource="orders"
+        )
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+    # ------------------------------------------------------------------
+    # Decision/operation mismatch
+    # ------------------------------------------------------------------
+
+    def test_decision_operation_mismatch_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], decision_operation="delete"
+        )
+        with pytest.raises(PolicyError, match="decision_operation|operation"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_decision_operation_matches_request_allowed(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], decision_operation="read"
+        )
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+    # ------------------------------------------------------------------
+    # Policy name/version mismatch
+    # ------------------------------------------------------------------
+
+    def test_policy_name_mismatch_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], policy_name="wrong-policy"
+        )
+        with pytest.raises(PolicyError, match="policy_name|policy name"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_policy_version_mismatch_blocked(self) -> None:
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], policy_version="9.9.9"
+        )
+        with pytest.raises(PolicyError, match="policy_version|policy version"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_policy_name_unknown_is_rejected(self) -> None:
+        """
+        'unknown' policy_name was the old lenient default.
+        The boundary now REQUIRES provenance — 'unknown' MUST be rejected.
+        """
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"], policy_name="unknown", policy_version="2.0"
+        )
+        with pytest.raises(PolicyError, match="policy_name|policy name|unknown"):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    def test_empty_provenance_is_rejected(self) -> None:
+        """
+        Empty string provenance was the old lenient bypass.
+        The boundary now REQUIRES provenance — empty strings MUST be rejected.
+        """
+        b, reg = self._frozen_boundary(["id"])
+        b.policy_engine = self._evil_engine(  # type: ignore[assignment]
+            reg, ["id"],
+            decision_resource="",   # empty = missing provenance → rejected
+            decision_operation="",
+            policy_name="",
+            policy_version="",
+        )
+        with pytest.raises(PolicyError):
+            b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Built-in engine provenance round-trip
+    # ------------------------------------------------------------------
+
+    def test_builtin_engine_populates_provenance(self) -> None:
+        """DataFencePolicyEngine must populate decision_resource and decision_operation."""
+        from datafence.core.policy import RowRule
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition("items", fields={
+            "id": FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        }, supported_operations=("read",)))
+        pol = DataFencePolicy("provenance-test", "3.0", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=["id", "tenant_id"],
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=10,
+        )})
+        engine = DataFencePolicyEngine(pol, registry=reg)
+        decision = engine.evaluate(Principal("u", "t-a"), Intent("items", Operation.READ))
+        assert decision.decision_resource == "items"
+        assert decision.decision_operation == "read"
+        assert decision.policy_name == "provenance-test"
+        assert decision.policy_version == "3.0"
+
+
+# ===========================================================================
+# 18. Strict provenance — independent custom engine with authoritative_policy
+# ===========================================================================
+
+
+class TestStrictProvenanceWithCustomEngine:
+    """
+    Prove that a completely independent custom PolicyEngine — one that
+    does NOT extend DataFencePolicyEngine — cannot bypass ceiling or
+    provenance invariants when the boundary is created with
+    authoritative_policy=.
+
+    These are the hardest attack scenarios: the engine shares no code with
+    the built-in engine and has full freedom to return any PolicyDecision.
+    """
+
+    @staticmethod
+    def _build_custom_boundary(
+        allowed_fields_ceiling: list[str] = None,
+        max_rows_ceiling: int = 10,
+        extra_registry_fields: dict | None = None,
+    ) -> tuple[DataFenceBoundary, DataFencePolicy]:
+        """
+        Build a boundary using a stub engine + explicit authoritative_policy.
+        Returns (boundary, authoritative_policy).
+        """
+        from datafence.core.policy import RowRule
+
+        if allowed_fields_ceiling is None:
+            allowed_fields_ceiling = ["id", "total"]
+
+        fields: dict[str, FieldDefinition] = {
+            "id":        FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+            "total":     FieldDefinition("total", "decimal"),
+            "email":     FieldDefinition("email", "string"),
+            "secret":    FieldDefinition("secret", "string",
+                             classification=DataClassification.RESTRICTED),
+        }
+        if extra_registry_fields:
+            fields.update(extra_registry_fields)
+
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition(
+            "items",
+            fields=fields,
+            supported_operations=("read",),
+        ))
+
+        auth_policy = DataFencePolicy("auth-policy", "3.0", {"items": ResourcePolicy(
+            "items",
+            actions={"read": ActionDecision.ALLOW},
+            allowed_fields=allowed_fields_ceiling,
+            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+            max_rows=max_rows_ceiling,
+        )})
+
+        # Completely independent stub engine — shares no code with DataFencePolicyEngine
+        class StubEngine:
+            def __init__(self, r: ResourceRegistry) -> None:
+                self._registry = r
+
+            @property
+            def registry(self) -> ResourceRegistry:
+                return self._registry
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                # This will be replaced per-test
+                raise NotImplementedError
+
+        stub = StubEngine(reg)
+        key = token_bytes(32)
+        b = DataFenceBoundary.create(
+            stub,  # type: ignore[arg-type]
+            reg,
+            key,
+            capability_audience="test",
+            authoritative_policy=auth_policy,
+        )
+        return b, auth_policy
+
+    def _make_decision(
+        self,
+        principal_tenant: str,
+        allowed_fields: list[str],
+        row_limit: int = 5,
+        resource: str = "items",
+        operation: str = "read",
+        policy_name: str = "auth-policy",
+        policy_version: str = "3.0",
+    ) -> PolicyDecision:
+        from datafence.core.resources import FieldRef, Filter, Predicate, PredicateOperator, RowLimit
+        return PolicyDecision.allow(
+            allowed_fields=allowed_fields,
+            enforced_filter=Filter(predicates=(
+                Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal_tenant),
+            )),
+            row_limit=RowLimit(row_limit),
+            policy_name=policy_name,
+            policy_version=policy_version,
+            decision_resource=resource,
+            decision_operation=operation,
+        )
+
+    def _set_engine_decision(self, b: DataFenceBoundary, decision: PolicyDecision) -> None:
+        """Replace the engine's evaluate() to return the given decision."""
+        def _eval(principal: Any, intent: Any) -> Any:
+            return decision
+        b.policy_engine.evaluate = _eval  # type: ignore[method-assign]
+
+    # ------------------------------------------------------------------
+    # Happy path: boundary accepts a correct independent engine decision
+    # ------------------------------------------------------------------
+
+    def test_correct_custom_engine_decision_accepted(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"], max_rows_ceiling=10)
+        decision = self._make_decision("t-a", ["id", "total"], row_limit=5)
+        self._set_engine_decision(b, decision)
+        cap = b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+        assert isinstance(cap, AuthorizedExecution)
+
+    # ------------------------------------------------------------------
+    # Invariant 3: field ceiling enforced even for independent engine
+    # ------------------------------------------------------------------
+
+    def test_field_outside_policy_ceiling_blocked_custom_engine(self) -> None:
+        """policy ceiling=['id','total'], engine returns ['id','total','email'] → rejected."""
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total", "email"])
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy ceiling|not permitted|outside"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_restricted_field_ceiling_blocked_custom_engine(self) -> None:
+        """RESTRICTED field must be rejected even from independent engine."""
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "secret"])
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="RESTRICTED"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 6: row-limit ceiling enforced even for independent engine
+    # ------------------------------------------------------------------
+
+    def test_excessive_row_limit_blocked_custom_engine(self) -> None:
+        """policy max_rows=10, engine returns row_limit=999 → rejected."""
+        b, _ = self._build_custom_boundary(["id", "total"], max_rows_ceiling=10)
+        decision = self._make_decision("t-a", ["id", "total"], row_limit=999)
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="max_rows|row_limit"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 7: resource provenance enforced
+    # ------------------------------------------------------------------
+
+    def test_resource_mismatch_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], resource="evil_table")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="decision_resource|resource"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_missing_resource_provenance_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], resource="")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="decision_resource|missing"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 8: operation provenance enforced
+    # ------------------------------------------------------------------
+
+    def test_operation_mismatch_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], operation="delete")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="decision_operation|operation"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_missing_operation_provenance_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], operation="")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="decision_operation|missing"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 9: policy name provenance enforced
+    # ------------------------------------------------------------------
+
+    def test_policy_name_mismatch_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], policy_name="attacker-policy")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy_name|policy name"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_unknown_policy_name_blocked_custom_engine(self) -> None:
+        """'unknown' is no longer a valid bypass — it must be rejected."""
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], policy_name="unknown")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy_name|unknown"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_missing_policy_name_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], policy_name="")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy_name|missing"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Invariant 10: policy version provenance enforced
+    # ------------------------------------------------------------------
+
+    def test_policy_version_mismatch_blocked_custom_engine(self) -> None:
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], policy_version="9.9")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy_version|policy version"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    def test_unknown_policy_version_blocked_custom_engine(self) -> None:
+        """'unknown' is no longer a valid bypass — it must be rejected."""
+        b, _ = self._build_custom_boundary(["id", "total"])
+        decision = self._make_decision("t-a", ["id", "total"], policy_version="unknown")
+        self._set_engine_decision(b, decision)
+        with pytest.raises(PolicyError, match="policy_version|unknown"):
+            b.authorize(Principal("u", "t-a"), Intent("items", Operation.READ))
+
+    # ------------------------------------------------------------------
+    # Mandatory authoritative_policy at create() time
+    # ------------------------------------------------------------------
+
+    def test_create_without_policy_raises(self) -> None:
+        """
+        DataFenceBoundary.create() must reject a custom engine that exposes
+        no ._policy and no authoritative_policy is provided.
+        """
+        reg = ResourceRegistry()
+        reg.register(ResourceDefinition("things", fields={
+            "id": FieldDefinition("id", "integer"),
+            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        }, supported_operations=("read",)))
+
+        class NoPolicyEngine:
+            @property
+            def registry(self) -> ResourceRegistry:
+                return reg
+
+            def evaluate(self, principal: Any, intent: Any) -> Any:
+                raise NotImplementedError
+
+        with pytest.raises(ValueError, match="authoritative.*DataFencePolicy|authoritative_policy"):
+            DataFenceBoundary.create(
+                NoPolicyEngine(),  # type: ignore[arg-type]
+                reg,
+                token_bytes(32),
+                # no authoritative_policy= provided
+            )
+
+    def test_boundary_exposes_frozen_policy(self) -> None:
+        """DataFenceBoundary must expose the frozen policy for audit/introspection."""
+        b, auth_policy = self._build_custom_boundary(["id", "total"])
+        assert b.frozen_policy.name == auth_policy.name
+        assert b.frozen_policy.version == auth_policy.version

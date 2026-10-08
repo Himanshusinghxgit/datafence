@@ -19,6 +19,7 @@ Canonical flow
         |
         ├─ ResourceRegistry.validate_intent()  — schema/identifier check
         ├─ PolicyEngine.evaluate()             — who can do what
+        ├─ _validate_decision()                — boundary-owned invariants
         └─ AuthorizedExecution (HMAC-signed)
                 |
                 v
@@ -27,24 +28,31 @@ Canonical flow
                 v
         Enterprise data
 
+Authoritative policy ownership
+-------------------------------
+``DataFenceBoundary`` holds its own deep-frozen ``DataFencePolicy`` snapshot
+(``_frozen_policy``) that is independent of the ``PolicyEngine`` implementation.
+Every ``PolicyDecision`` — from the built-in engine or any custom engine — is
+validated against this frozen policy before a capability is signed.
+
+This means:
+- A custom ``PolicyEngine`` CANNOT authorize fields outside ``allowed_fields``.
+- A custom ``PolicyEngine`` CANNOT authorize more rows than ``max_rows``.
+- Decision provenance (resource, operation, policy name/version) is ALWAYS
+  cross-checked against the frozen policy and the request.
+
+There is no lenient bypass path.  An ALLOW decision with incomplete or
+mismatched provenance is REJECTED.
+
 Compile-time validation
 -----------------------
 ``DataFenceBoundary.create()`` performs **compile-time** validation of the
-policy against the registry BEFORE serving any authorization requests:
-
-    - Every policy resource must exist in the registry.
-    - Every allowed/denied/row-rule field must exist on its resource.
-    - Every action named in the policy must be a valid operation for the resource.
-    - Tenant-scoped resources MUST have a tenant-bound row rule in the policy, or
-      be explicitly declared cross-tenant — otherwise creation is rejected.
-
-This ensures the boundary NEVER silently serves a misconfigured policy.
+policy against the registry BEFORE serving any authorization requests.
 
 Policy immutability
 -------------------
-After ``create()`` returns, the policy is **frozen** via an internal snapshot.
-Mutations to the original ``DataFencePolicy`` or ``ResourcePolicy`` objects
-have no effect on an already-created boundary.
+After ``create()`` returns, the policy snapshot is deep-frozen and stored
+on the boundary itself.  Mutations to the original objects have no effect.
 
 Signing key requirements
 ------------------------
@@ -93,27 +101,20 @@ def _validate_policy_against_registry(
     policy: DataFencePolicy,
     registry: ResourceRegistry,
 ) -> None:
-    """
-    Validate the policy against the registry at boundary creation time.
-
-    Raises:
-        ConfigurationError: If any policy reference is invalid.
-    """
+    """Validate the policy against the registry at boundary creation time."""
     errors: list[str] = []
 
     for res_name, rp in policy.resources.items():
-        # Resource must exist in registry
         res_def = registry.get(res_name)
         if res_def is None:
             errors.append(
                 f"Policy references resource {res_name!r} which is not registered."
             )
-            continue  # can't validate fields without the resource
+            continue
 
         valid_fields = set(res_def.field_names())
         valid_ops = set(res_def.supported_operations)
 
-        # Validate actions reference valid operations
         for action in rp.actions:
             if action.lower() not in valid_ops:
                 errors.append(
@@ -121,40 +122,33 @@ def _validate_policy_against_registry(
                     f"{action!r}. Supported: {sorted(valid_ops)}"
                 )
 
-        # Validate allowed_fields
         for f in rp.allowed_fields:
             if f not in valid_fields:
                 errors.append(
                     f"Policy for {res_name!r} references unknown allowed_field {f!r}."
                 )
 
-        # Validate denied_fields
         for f in rp.denied_fields:
             if f not in valid_fields:
                 errors.append(
                     f"Policy for {res_name!r} references unknown denied_field {f!r}."
                 )
 
-        # Validate row-rule fields
         for rule in rp.row_rules:
             if rule.field not in valid_fields:
                 errors.append(
                     f"Policy for {res_name!r} row-rule references unknown field {rule.field!r}."
                 )
 
-        # Validate max_rows is positive
         if rp.max_rows <= 0:
             errors.append(
                 f"Policy for {res_name!r} has invalid max_rows={rp.max_rows} "
                 "(must be positive)."
             )
 
-        # Tenant isolation check — strict semantic invariant
         tenant_key = res_def.tenant_key()
         from datafence.core.policy import ActionDecision
-        has_allow_action = any(
-            v == ActionDecision.ALLOW for v in rp.actions.values()
-        )
+        has_allow_action = any(v == ActionDecision.ALLOW for v in rp.actions.values())
         if tenant_key and has_allow_action:
             err = _validate_tenant_row_rule(rp, tenant_key, res_name)
             if err:
@@ -172,18 +166,10 @@ def _is_tenant_bound_value(value: Any) -> bool:
 
 
 def _validate_tenant_row_rule(rp: ResourcePolicy, tenant_key: str, res_name: str) -> str | None:
-    """
-    Validate the tenant isolation row rule for *res_name*.
-
-    Returns an error string if invalid, or None if OK.
-    Requires exactly: field == tenant_key, operator == EQ, value == ":actor_tenant_id".
-    """
+    """Validate tenant isolation row rule. Returns error string or None."""
     from datafence.core.resources import PredicateOperator
 
-    tenant_rules = [
-        r for r in rp.row_rules
-        if r.field == tenant_key
-    ]
+    tenant_rules = [r for r in rp.row_rules if r.field == tenant_key]
 
     if not tenant_rules:
         return (
@@ -193,76 +179,71 @@ def _validate_tenant_row_rule(rp: ResourcePolicy, tenant_key: str, res_name: str
         )
 
     for rule in tenant_rules:
-        # Operator must be EQ
         if rule.operator != PredicateOperator.EQ:
             return (
                 f"Policy for {res_name!r}: tenant isolation row rule on "
-                f"{tenant_key!r} must use operator EQ, got {rule.operator!r}. "
-                "Non-EQ operators on the tenant key do not provide mandatory isolation."
+                f"{tenant_key!r} must use operator EQ, got {rule.operator!r}."
             )
-        # Value must be the principal tenant reference
         if not _is_tenant_bound_value(rule.value):
             return (
                 f"Policy for {res_name!r}: tenant isolation row rule on "
                 f"{tenant_key!r} must use value ':actor_tenant_id', "
-                f"got {rule.value!r}. "
-                "Literal values and other actor references do not provide "
-                "per-principal tenant isolation."
+                f"got {rule.value!r}."
             )
 
     return None
 
 
 # ---------------------------------------------------------------------------
-# Runtime decision validator — independent boundary-level cross-check
+# Runtime decision validator — boundary-owned, always executes
 # ---------------------------------------------------------------------------
 
 
-def _validate_decision_against_registry(
+def _validate_decision(
     decision: EnginePolicyDecision,
     request: Request,
     registry: ResourceRegistry,
+    frozen_policy: DataFencePolicy,
 ) -> None:
     """
     Independently validate an ALLOW ``PolicyDecision`` against the frozen
-    registry and the original request.
+    registry and frozen policy.
 
     This is the final security gate before DataFenceBoundary signs any
-    capability.  It runs regardless of which ``PolicyEngine`` produced the
-    decision, so that even a buggy or malicious custom engine cannot cause
-    the boundary to sign an unsafe capability.
+    capability.  It executes unconditionally regardless of which
+    ``PolicyEngine`` produced the decision.
 
-    All failures raise ``PolicyError`` (fail closed) except where a denial
-    is appropriate — those raise ``PolicyDeniedError``.
+    The ``frozen_policy`` is owned by the boundary and cannot be mutated
+    or replaced by the engine.
 
     Invariants enforced
     -------------------
     1.  allowed_fields are all known in the registry.
     2.  allowed_fields contain no RESTRICTED fields.
-    3.  allowed_fields are a subset of what the policy configured (if available).
-    4.  enforced_filter predicates reference only known, non-RESTRICTED fields.
-    5.  enforced_filter contains the mandatory tenant predicate (EQ, resolved value)
-        for tenant-scoped resources.
-    6.  decision.row_limit.value is positive and does not exceed policy max_rows
-        (if a DataFencePolicyEngine with an accessible frozen policy is in use).
-    7.  decision operation matches the request operation.
-    8.  decision resource matches the request resource (via policy_version provenance check).
-    9.  The decision does not carry an empty policy_version for a non-trivial decision.
-    10. The request operation is supported by the registry for this resource.
+    3.  allowed_fields ⊆ frozen policy ceiling (allowed minus denied/restricted).
+    4.  enforced_filter fields are known and non-RESTRICTED.
+    5.  Tenant-scoped resources have a mandatory EQ tenant predicate matching
+        the authenticated principal's tenant_id (resolved value).
+    6.  row_limit.value is positive AND ≤ policy max_rows.
+    7.  decision_resource is present and matches request.intent.resource.
+    8.  decision_operation is present and matches request operation.
+    9.  decision.policy_name matches frozen_policy.name.
+    10. decision.policy_version matches frozen_policy.version.
+    11. allowed_fields is non-empty.
     """
     from datafence.core.registry import DataClassification
     from datafence.core.resources import PredicateOperator
 
     resource_name = request.intent.resource
     principal = request.actor
-    operation = request.intent.operation
+    op_str = request.intent.operation.value.lower()
 
-    # Retrieve the frozen resource definition
+    # ---- Resource definition ----
     res_def = registry.get(resource_name)
     if res_def is None:
         raise PolicyError(
-            f"Boundary cannot validate decision: resource {resource_name!r} "
-            "not found in registry after validation — registry may have been tampered"
+            f"Boundary: resource {resource_name!r} disappeared from registry — "
+            "registry integrity violation."
         )
 
     valid_fields: frozenset[str] = frozenset(res_def.field_names())
@@ -271,113 +252,155 @@ def _validate_decision_against_registry(
         if fd.classification == DataClassification.RESTRICTED
     )
 
-    # ------------------------------------------------------------------
-    # Invariant 7 / 8: operation and resource match the request
-    # ------------------------------------------------------------------
-    # The operation carried by the decision must match what was requested.
-    # (PolicyDecision doesn't carry operation directly, but the matched_rules
-    # and policy_version are cross-checked for sanity; the primary defence is
-    # that _build_capability uses request.intent.operation, not the decision.)
-    # Enforce that the operation is supported by the registry.
-    op_str = operation.value.lower()
-    if op_str not in res_def.supported_operations:
-        raise PolicyDeniedError(
-            f"Boundary rejects decision: operation {op_str!r} is not supported "
-            f"on resource {resource_name!r} (registry says: {sorted(res_def.supported_operations)})"
-        )
-
-    # ------------------------------------------------------------------
-    # Invariant 1: allowed_fields must exist in registry
-    # ------------------------------------------------------------------
-    unknown_allowed = [f for f in decision.allowed_fields if f not in valid_fields]
-    if unknown_allowed:
-        raise PolicyError(
-            f"Boundary rejects decision: allowed_fields contains fields not in "
-            f"registry for {resource_name!r}: {unknown_allowed}. "
-            "A PolicyEngine must not authorize unknown fields."
-        )
-
-    # ------------------------------------------------------------------
-    # Invariant 2: allowed_fields must not contain RESTRICTED fields
-    # ------------------------------------------------------------------
-    restricted_allowed = [f for f in decision.allowed_fields if f in restricted_fields]
-    if restricted_allowed:
-        raise PolicyError(
-            f"Boundary rejects decision: allowed_fields contains RESTRICTED fields "
-            f"for {resource_name!r}: {restricted_allowed}. "
-            "RESTRICTED fields must never be in an allowed_fields list."
-        )
-
-    # ------------------------------------------------------------------
-    # Invariant 4+5: enforced_filter field references
-    # ------------------------------------------------------------------
-    tenant_key = res_def.tenant_key()
-    tenant_predicate_found = False
-
-    for pred in decision.enforced_filter.predicates:
-        field_name = pred.field.name
-
-        # Field must exist in registry
-        if field_name not in valid_fields:
-            raise PolicyError(
-                f"Boundary rejects decision: enforced_filter references unknown "
-                f"field {field_name!r} on resource {resource_name!r}."
-            )
-
-        # Invariant 5: RESTRICTED fields must not be in enforced_filter
-        if field_name in restricted_fields:
-            raise PolicyError(
-                f"Boundary rejects decision: enforced_filter references RESTRICTED "
-                f"field {field_name!r} on resource {resource_name!r}."
-            )
-
-        # Check tenant predicate presence and semantics
-        if tenant_key and field_name == tenant_key:
-            # Operator must be EQ
-            if pred.operator != PredicateOperator.EQ:
-                raise PolicyError(
-                    f"Boundary rejects decision: enforced_filter tenant predicate on "
-                    f"{tenant_key!r} uses operator {pred.operator!r} — must be EQ."
-                )
-            # Value must equal the authenticated principal's tenant_id (resolved)
-            if pred.value != principal.tenant_id:
-                raise PolicyError(
-                    f"Boundary rejects decision: enforced_filter tenant predicate "
-                    f"value {pred.value!r} does not match authenticated principal's "
-                    f"tenant_id {principal.tenant_id!r}. "
-                    "Cross-tenant capability issuance is not permitted."
-                )
-            tenant_predicate_found = True
-
-    # ------------------------------------------------------------------
-    # Invariant 5 (mandatory tenant predicate)
-    # ------------------------------------------------------------------
-    if tenant_key and not tenant_predicate_found:
-        raise PolicyError(
-            f"Boundary rejects decision: resource {resource_name!r} is "
-            f"tenant-scoped (tenant key: {tenant_key!r}) but the enforced_filter "
-            "contains no tenant predicate. A PolicyEngine must always inject "
-            "the tenant isolation predicate for tenant-scoped resources."
-        )
-
-    # ------------------------------------------------------------------
-    # Invariant 12: decision must not be structurally malformed
-    # ------------------------------------------------------------------
+    # ---- Invariant 11 ----
     if not decision.allowed_fields:
         raise PolicyError(
             "Boundary rejects decision: allowed_fields is empty in an ALLOW decision."
         )
 
+    # ---- Invariant 6 (row_limit structural) ----
     try:
         _row_limit = decision.row_limit.value
     except Exception as exc:
         raise PolicyError(
             f"Boundary rejects decision: row_limit is malformed — {exc}"
         ) from exc
-
     if _row_limit <= 0:
         raise PolicyError(
             f"Boundary rejects decision: row_limit.value={_row_limit!r} must be positive."
+        )
+
+    # ---- Invariant 7 (operation supported) ----
+    if op_str not in res_def.supported_operations:
+        raise PolicyDeniedError(
+            f"Boundary rejects decision: operation {op_str!r} not supported "
+            f"on resource {resource_name!r}."
+        )
+
+    # ---- Invariant 1 (unknown fields) ----
+    unknown_allowed = [f for f in decision.allowed_fields if f not in valid_fields]
+    if unknown_allowed:
+        raise PolicyError(
+            f"Boundary rejects decision: allowed_fields contains fields not in "
+            f"registry for {resource_name!r}: {unknown_allowed}."
+        )
+
+    # ---- Invariant 2 (RESTRICTED fields) ----
+    restricted_allowed = [f for f in decision.allowed_fields if f in restricted_fields]
+    if restricted_allowed:
+        raise PolicyError(
+            f"Boundary rejects decision: allowed_fields contains RESTRICTED fields "
+            f"for {resource_name!r}: {restricted_allowed}."
+        )
+
+    # ---- Invariant 3 (policy field ceiling) ----
+    rp = frozen_policy.resource_policy(resource_name)
+    if rp is not None:
+        effective_ceiling = frozenset(
+            f for f in rp.allowed_fields
+            if f not in rp.denied_fields and f not in restricted_fields
+        )
+        policy_unauthorized = [
+            f for f in decision.allowed_fields if f not in effective_ceiling
+        ]
+        if policy_unauthorized:
+            raise PolicyError(
+                f"Boundary rejects decision: allowed_fields contains fields outside "
+                f"the policy ceiling for {resource_name!r}: {policy_unauthorized}. "
+                "A PolicyEngine must not authorize fields beyond the frozen policy."
+            )
+
+        # ---- Invariant 6 (row-limit ceiling) ----
+        if _row_limit > rp.max_rows:
+            raise PolicyError(
+                f"Boundary rejects decision: row_limit.value={_row_limit} exceeds "
+                f"policy max_rows={rp.max_rows} for {resource_name!r}."
+            )
+
+    # ---- Invariants 4 + 5 (enforced_filter fields and tenant predicate) ----
+    tenant_key = res_def.tenant_key()
+    tenant_predicate_found = False
+
+    for pred in decision.enforced_filter.predicates:
+        field_name = pred.field.name
+
+        if field_name not in valid_fields:
+            raise PolicyError(
+                f"Boundary rejects decision: enforced_filter references unknown "
+                f"field {field_name!r} on resource {resource_name!r}."
+            )
+
+        if field_name in restricted_fields:
+            raise PolicyError(
+                f"Boundary rejects decision: enforced_filter references RESTRICTED "
+                f"field {field_name!r} on resource {resource_name!r}."
+            )
+
+        if tenant_key and field_name == tenant_key:
+            if pred.operator != PredicateOperator.EQ:
+                raise PolicyError(
+                    f"Boundary rejects decision: enforced_filter tenant predicate on "
+                    f"{tenant_key!r} uses operator {pred.operator!r} — must be EQ."
+                )
+            if pred.value != principal.tenant_id:
+                raise PolicyError(
+                    f"Boundary rejects decision: enforced_filter tenant predicate "
+                    f"value {pred.value!r} does not match principal tenant_id "
+                    f"{principal.tenant_id!r} — cross-tenant capability not permitted."
+                )
+            tenant_predicate_found = True
+
+    if tenant_key and not tenant_predicate_found:
+        raise PolicyError(
+            f"Boundary rejects decision: resource {resource_name!r} is tenant-scoped "
+            f"(tenant key: {tenant_key!r}) but enforced_filter has no tenant predicate."
+        )
+
+    # ---- Invariant 7 (decision_resource provenance) ----
+    if not decision.decision_resource:
+        raise PolicyError(
+            "Boundary rejects decision: decision_resource is missing or empty. "
+            "A PolicyEngine must set decision_resource on every ALLOW decision."
+        )
+    if decision.decision_resource != resource_name:
+        raise PolicyError(
+            f"Boundary rejects decision: decision_resource={decision.decision_resource!r} "
+            f"does not match request resource {resource_name!r}."
+        )
+
+    # ---- Invariant 8 (decision_operation provenance) ----
+    if not decision.decision_operation:
+        raise PolicyError(
+            "Boundary rejects decision: decision_operation is missing or empty. "
+            "A PolicyEngine must set decision_operation on every ALLOW decision."
+        )
+    if decision.decision_operation != op_str:
+        raise PolicyError(
+            f"Boundary rejects decision: decision_operation={decision.decision_operation!r} "
+            f"does not match request operation {op_str!r}."
+        )
+
+    # ---- Invariants 9 + 10 (policy name/version provenance) ----
+    if not decision.policy_name or decision.policy_name == "unknown":
+        raise PolicyError(
+            "Boundary rejects decision: policy_name is missing or 'unknown'. "
+            "A PolicyEngine must set policy_name on every ALLOW decision."
+        )
+    if decision.policy_name != frozen_policy.name:
+        raise PolicyError(
+            f"Boundary rejects decision: decision.policy_name={decision.policy_name!r} "
+            f"does not match frozen policy name {frozen_policy.name!r}."
+        )
+
+    if not decision.policy_version or decision.policy_version == "unknown":
+        raise PolicyError(
+            "Boundary rejects decision: policy_version is missing or 'unknown'. "
+            "A PolicyEngine must set policy_version on every ALLOW decision."
+        )
+    if decision.policy_version != frozen_policy.version:
+        raise PolicyError(
+            f"Boundary rejects decision: decision.policy_version={decision.policy_version!r} "
+            f"does not match frozen policy version {frozen_policy.version!r}."
         )
 
 
@@ -391,18 +414,29 @@ class DataFenceBoundary:
 
     Always construct via :meth:`create` — direct instantiation is blocked.
 
+    The boundary owns a deep-frozen ``DataFencePolicy`` snapshot that is
+    used to validate every ``PolicyDecision`` before signing.  No custom
+    ``PolicyEngine`` can bypass field-ceiling, row-limit, or provenance
+    invariants.
+
     Parameters (via ``create``)
     ---------------------------
-    policy_engine       : Object implementing the PolicyEngine protocol.
-    registry            : Populated ResourceRegistry; frozen at create() time.
-    signing_key         : HMAC key — minimum 32 bytes.  Keep it secret.
+    policy_engine        : Object implementing the PolicyEngine protocol.
+                           Must expose ``._policy`` or supply
+                           ``authoritative_policy`` explicitly.
+    registry             : Populated ResourceRegistry; frozen at create() time.
+    signing_key          : HMAC key — minimum 32 bytes.
+    authoritative_policy : Explicit ``DataFencePolicy`` for custom engines
+                           that do not expose ``._policy``.  Must match the
+                           same registry.  Required when the engine does not
+                           expose ``._policy``.
     capability_ttl_seconds : How long issued capabilities are valid (default 300 s).
-    capability_audience : Audience tag embedded in every capability (default ``"datafence"``).
+    capability_audience  : Audience tag embedded in every capability.
     """
 
-    # Typed instance attributes — declared here so mypy can see them.
     policy_engine: PolicyEngine
     _registry: ResourceRegistry
+    _frozen_policy: DataFencePolicy   # authoritative — boundary-owned, immutable
     _signing_key: bytes
     _capability_ttl_seconds: int
     _capability_audience: str
@@ -422,20 +456,12 @@ class DataFenceBoundary:
         signing_key: bytes,
         capability_ttl_seconds: int = 300,
         capability_audience: str = "datafence",
-    ) -> DataFenceBoundary:
+        authoritative_policy: DataFencePolicy | None = None,
+    ) -> "DataFenceBoundary":
         """Create and validate a boundary.
 
-        Performs compile-time validation of:
-        - Signing key minimum length (32 bytes).
-        - policy_engine/registry identity match.
-        - Every policy resource exists in the registry.
-        - Every policy field reference is valid.
-        - Every policy operation reference is valid.
-        - Tenant-scoped resources have a mandatory tenant isolation row rule.
-        - The policy is deep-copied and frozen so post-create mutations have no effect.
-
         Raises:
-            ValueError: For invalid primitive arguments.
+            ValueError: For invalid primitive arguments or missing policy.
             ConfigurationError: For policy/registry consistency failures.
         """
         if len(signing_key) < MIN_KEY_BYTES:
@@ -455,65 +481,69 @@ class DataFenceBoundary:
                 "passed to DataFenceBoundary.create()"
             )
 
-        # Compile-time policy + registry validation (Phases 5, 7)
-        raw_policy = getattr(policy_engine, "_policy", None)
-        if isinstance(raw_policy, DataFencePolicy):
-            _validate_policy_against_registry(raw_policy, registry)
+        # ------------------------------------------------------------------
+        # Resolve the authoritative policy (boundary-owned)
+        # ------------------------------------------------------------------
+        # Priority: explicit authoritative_policy argument > engine._policy
+        raw_policy: DataFencePolicy | None = authoritative_policy
+        if raw_policy is None:
+            candidate = getattr(policy_engine, "_policy", None)
+            if isinstance(candidate, DataFencePolicy):
+                raw_policy = candidate
 
-        # Freeze the registry — no new resources after this point
+        if raw_policy is None:
+            raise ValueError(
+                "DataFenceBoundary.create() requires an authoritative DataFencePolicy. "
+                "Either use DataFencePolicyEngine (which exposes ._policy automatically) "
+                "or pass authoritative_policy=<your_policy> explicitly for custom engines."
+            )
+
+        # ------------------------------------------------------------------
+        # Compile-time validation
+        # ------------------------------------------------------------------
+        _validate_policy_against_registry(raw_policy, registry)
+
+        # ------------------------------------------------------------------
+        # Freeze everything
+        # ------------------------------------------------------------------
         registry.freeze()
+        frozen_policy = _deep_freeze_policy(raw_policy)
 
-        # Freeze the policy by deep-copying it into the engine so that
-        # mutations to the caller's DataFencePolicy have no effect (Phase 6)
-        if isinstance(policy_engine, DataFencePolicyEngine) and isinstance(raw_policy, DataFencePolicy):
-            frozen_policy = _deep_freeze_policy(raw_policy)
+        # Push the frozen snapshot back into built-in engines so they also
+        # evaluate against the frozen state.
+        if isinstance(policy_engine, DataFencePolicyEngine):
             object.__setattr__(policy_engine, "_policy", frozen_policy)
 
         boundary = cls(_SENTINEL)
         boundary.policy_engine = policy_engine
         boundary._registry = registry
+        boundary._frozen_policy = frozen_policy          # boundary-owned, immutable
         boundary._signing_key = signing_key
         boundary._capability_ttl_seconds = capability_ttl_seconds
         boundary._capability_audience = capability_audience
         return boundary
 
     # ------------------------------------------------------------------
-    # Public API — the only execution path
+    # Public API
     # ------------------------------------------------------------------
 
     def authorize(self, principal: Principal, intent: Intent) -> AuthorizedExecution:
-        """Authorize an intent and return a signed authorization capability.
-
-        This is the *only* public method on DataFenceBoundary.
-        No connector is constructed or invoked here. DataFence does not
-        execute enterprise data operations.
-
-        Args:
-            principal : Authenticated principal from the application auth layer.
-            intent    : Untrusted request from an AI agent or application.
-
-        Returns:
-            Signed AuthorizedExecution capability.
-
-        Raises:
-            PolicyDeniedError : If the request is denied by registry or policy.
-            PolicyError       : If policy evaluation fails unexpectedly.
-        """
+        """Authorize an intent and return a signed authorization capability."""
         request = Request.create(principal, intent)
 
-        # 1. Registry validation — fast-fail on unknown resources/fields/ops.
+        # 1. Registry validation
         try:
             self._registry.validate_intent(intent)
         except ValueError as exc:
             raise PolicyDeniedError(str(exc)) from exc
 
-        # 2. Policy evaluation — must not raise; any unexpected exception → error.
+        # 2. Policy evaluation
         try:
             decision = self.policy_engine.evaluate(principal=principal, intent=intent)
         except Exception as exc:
             raise PolicyError("Policy evaluation failed unexpectedly") from exc
 
-        # 3. Structural validation — malformed decision fails closed.
+        # 3. Structural validation
         if not isinstance(decision, EnginePolicyDecision):
             raise PolicyError(
                 f"Policy engine returned unexpected type: {type(decision).__name__!r}"
@@ -524,16 +554,14 @@ class DataFenceBoundary:
         ):
             raise PolicyError("Policy decision has invalid or missing effect — failing closed")
 
-        # 4. Deny path.
+        # 4. Deny path
         if decision.effect == PolicyEffect.DENY:
             raise PolicyDeniedError("; ".join(decision.reasons))
 
-        # 5. Independent boundary-level validation of the ALLOW decision.
-        #    This runs regardless of which PolicyEngine produced the decision.
-        #    A custom engine cannot bypass registry/security invariants.
-        _validate_decision_against_registry(decision, request, self._registry)
+        # 5. Independent boundary-level validation — ALWAYS runs, uses boundary-owned policy
+        _validate_decision(decision, request, self._registry, self._frozen_policy)
 
-        # 6. Build and return the signed capability.
+        # 6. Build and sign capability
         return self._build_capability(request, decision)
 
     # ------------------------------------------------------------------
@@ -543,21 +571,16 @@ class DataFenceBoundary:
     def _build_capability(
         self, request: Request, decision: EnginePolicyDecision
     ) -> AuthorizedExecution:
-        """Construct and sign an AuthorizedExecution from a policy ALLOW."""
-        # Intersect policy-allowed fields with agent-requested fields.
         selected_fields = list(decision.allowed_fields)
         if request.intent.fields:
             selected_fields = [f for f in request.intent.fields if f in selected_fields]
         if not selected_fields:
             raise PolicyDeniedError("No authorized fields available for this request")
 
-        # Merge policy-enforced filters with agent-requested filters.
-        # Policy filter takes priority over agent-supplied filters on the same field.
         resolved_filter = decision.enforced_filter.merge(
             Filter.from_dict(request.intent.filters)
         ).resolve(request.actor)
 
-        # Row limit: policy is the ceiling; agent may request fewer.
         limit = decision.row_limit.value
         if request.intent.limit is not None:
             limit = min(request.intent.limit, limit)
@@ -588,20 +611,19 @@ class DataFenceBoundary:
         """Return the frozen registry used for authorization."""
         return self._registry
 
+    @property
+    def frozen_policy(self) -> DataFencePolicy:
+        """Return the boundary-owned frozen policy snapshot."""
+        return self._frozen_policy
+
 
 # ---------------------------------------------------------------------------
-# Policy deep-freeze helper (Phase 6)
+# Policy deep-freeze helper
 # ---------------------------------------------------------------------------
 
 
 def _deep_freeze_policy(policy: DataFencePolicy) -> DataFencePolicy:
-    """
-    Return a deep-copied, immutable snapshot of *policy*.
-
-    After ``DataFenceBoundary.create()`` the boundary always evaluates
-    against this snapshot — mutations to the caller's original objects
-    have no effect.
-    """
+    """Return a deep-copied, immutable snapshot of *policy*."""
     frozen_resources: dict[str, ResourcePolicy] = {}
     for name, rp in policy.resources.items():
         frozen_resources[name] = ResourcePolicy(

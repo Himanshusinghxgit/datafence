@@ -207,12 +207,23 @@ class PolicyDecision:
     Result of evaluating a policy for one request.
 
     obligations is carried into AuthorizedExecution as audit metadata.
+
+    Provenance fields (resource, operation) allow the boundary to verify
+    that the decision was produced for the exact request it is being
+    applied to.  They are optional (default to empty string / None) for
+    backward-compatibility with custom PolicyEngine implementations, but
+    the built-in DataFencePolicyEngine always populates them.
     """
 
     effect: PolicyEffect
     reasons: tuple[str, ...] = ()
     policy_name: str = "unknown"
     policy_version: str = "unknown"
+
+    # Provenance — which resource/operation this decision was produced for.
+    # Empty string means "not provided by this engine" (treated leniently).
+    decision_resource: str = ""
+    decision_operation: str = ""
 
     # Populated only for ALLOW
     allowed_fields: tuple[str, ...] = ()
@@ -254,11 +265,15 @@ class PolicyDecision:
         policy_version: str = "unknown",
         matched_rules: list[str] | None = None,
         obligations: dict[str, Any] | None = None,
+        decision_resource: str = "",
+        decision_operation: str = "",
     ) -> PolicyDecision:
         return cls(
             effect=PolicyEffect.ALLOW,
             policy_name=policy_name,
             policy_version=policy_version,
+            decision_resource=decision_resource,
+            decision_operation=decision_operation,
             allowed_fields=tuple(allowed_fields),
             enforced_filter=enforced_filter,
             row_limit=row_limit,
@@ -458,6 +473,8 @@ class DataFencePolicyEngine(PolicyEngine):
             policy_version=self._policy.version,
             matched_rules=matched,
             obligations=rp.obligations,
+            decision_resource=resource,
+            decision_operation=action,
         )
 
 
