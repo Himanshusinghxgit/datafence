@@ -207,30 +207,35 @@ def _validate_decision(
     frozen_policy: DataFencePolicy,
 ) -> None:
     """
-    Independently validate an ALLOW ``PolicyDecision`` against the frozen
+    Independently validate an ALLOW PolicyDecision against the frozen
     registry and frozen policy.
 
     This is the final security gate before DataFenceBoundary signs any
-    capability.  It executes unconditionally regardless of which
-    ``PolicyEngine`` produced the decision.
+    capability. It executes unconditionally regardless of which
+    PolicyEngine produced the decision.
 
-    The ``frozen_policy`` is owned by the boundary and cannot be mutated
-    or replaced by the engine.
+    The frozen_policy is owned by the boundary and is independent of
+    the PolicyEngine implementation.
 
     Invariants enforced
     -------------------
-    1.  allowed_fields are all known in the registry.
-    2.  allowed_fields contain no RESTRICTED fields.
-    3.  allowed_fields ⊆ frozen policy ceiling (allowed minus denied/restricted).
-    4.  enforced_filter fields are known and non-RESTRICTED.
-    5.  Tenant-scoped resources have a mandatory EQ tenant predicate matching
-        the authenticated principal's tenant_id (resolved value).
-    6.  row_limit.value is positive AND ≤ policy max_rows.
-    7.  decision_resource is present and matches request.intent.resource.
-    8.  decision_operation is present and matches request operation.
-    9.  decision.policy_name matches frozen_policy.name.
-    10. decision.policy_version matches frozen_policy.version.
-    11. allowed_fields is non-empty.
+    1. allowed_fields are all known in the registry.
+    2. allowed_fields contain no RESTRICTED fields.
+    3. allowed_fields are within the frozen policy ceiling.
+    4. enforced_filter fields are known and non-RESTRICTED.
+    5. Tenant-scoped resources have a mandatory EQ tenant predicate
+       matching the authenticated principal tenant_id.
+    6. Every authoritative policy row rule survives into the final
+       enforced_filter.
+    7. row_limit.value is positive and <= policy max_rows.
+    8. The requested operation is supported by the registry.
+    9. The requested operation is explicitly ALLOWed by policy.
+    10. Agent-provided filter fields are permitted by policy.
+    11. decision_resource is present and matches the request resource.
+    12. decision_operation is present and matches the request operation.
+    13. decision.policy_name matches frozen_policy.name.
+    14. decision.policy_version matches frozen_policy.version.
+    15. allowed_fields is non-empty.
     """
     from datafence.core.registry import DataClassification
     from datafence.core.resources import PredicateOperator
@@ -239,8 +244,12 @@ def _validate_decision(
     principal = request.actor
     op_str = request.intent.operation.value.lower()
 
-    # ---- Resource definition ----
+    # ------------------------------------------------------------------
+    # Resource definition
+    # ------------------------------------------------------------------
+
     res_def = registry.get(resource_name)
+
     if res_def is None:
         raise PolicyError(
             f"Boundary: resource {resource_name!r} disappeared from registry — "
@@ -248,63 +257,80 @@ def _validate_decision(
         )
 
     valid_fields: frozenset[str] = frozenset(res_def.field_names())
+
     restricted_fields: frozenset[str] = frozenset(
-        n for n, fd in res_def.fields.items()
-        if fd.classification == DataClassification.RESTRICTED
+        name
+        for name, field_def in res_def.fields.items()
+        if field_def.classification == DataClassification.RESTRICTED
     )
 
-    # ---- Invariant 11 ----
-    if not decision.allowed_fields:
-        raise PolicyError(
-            "Boundary rejects decision: allowed_fields is empty in an ALLOW decision."
-        )
+    # ------------------------------------------------------------------
+    # Authoritative frozen policy
+    # ------------------------------------------------------------------
 
-    # ---- Invariant 6 (row_limit structural) ----
-    try:
-        _row_limit = decision.row_limit.value
-    except Exception as exc:
-        raise PolicyError(
-            f"Boundary rejects decision: row_limit is malformed — {exc}"
-        ) from exc
-    if _row_limit <= 0:
-        raise PolicyError(
-            f"Boundary rejects decision: row_limit.value={_row_limit!r} must be positive."
-        )
-
-    # ---- Invariant 7 (operation supported) ----
-    if op_str not in res_def.supported_operations:
-        raise PolicyDeniedError(
-            f"Boundary rejects decision: operation {op_str!r} not supported "
-            f"on resource {resource_name!r}."
-        )
-
-    # ---- Invariant 1 (unknown fields) ----
-    unknown_allowed = [f for f in decision.allowed_fields if f not in valid_fields]
-    if unknown_allowed:
-        raise PolicyError(
-            f"Boundary rejects decision: allowed_fields contains fields not in "
-            f"registry for {resource_name!r}: {unknown_allowed}."
-        )
-
-    # ---- Invariant 2 (RESTRICTED fields) ----
-    restricted_allowed = [f for f in decision.allowed_fields if f in restricted_fields]
-    if restricted_allowed:
-        raise PolicyError(
-            f"Boundary rejects decision: allowed_fields contains RESTRICTED fields "
-            f"for {resource_name!r}: {restricted_allowed}."
-        )
-
-    # ---- Invariant 3 (policy field ceiling) ----
-    
     rp = frozen_policy.resource_policy(resource_name)
+
     if rp is None:
         raise PolicyDeniedError(
             f"Boundary rejects decision: no policy exists for resource "
             f"{resource_name!r}."
         )
 
-    # The final boundary must never allow an operation that the
-    # authoritative policy denies or leaves implicitly denied.
+    # ------------------------------------------------------------------
+    # Invariant 15 — non-empty allowed_fields
+    # ------------------------------------------------------------------
+
+    if not decision.allowed_fields:
+        raise PolicyError(
+            "Boundary rejects decision: allowed_fields is empty "
+            "in an ALLOW decision."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 7 — row_limit structural validation
+    # ------------------------------------------------------------------
+
+    try:
+        row_limit = decision.row_limit.value
+    except Exception as exc:
+        raise PolicyError(
+            f"Boundary rejects decision: row_limit is malformed — {exc}"
+        ) from exc
+
+    if row_limit <= 0:
+        raise PolicyError(
+            f"Boundary rejects decision: row_limit.value={row_limit!r} "
+            "must be positive."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 7 — row-limit policy ceiling
+    # ------------------------------------------------------------------
+
+    if row_limit > rp.max_rows:
+        raise PolicyError(
+            f"Boundary rejects decision: row_limit.value={row_limit!r} "
+            f"exceeds policy max_rows={rp.max_rows} for "
+            f"{resource_name!r}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 8 — registry operation support
+    # ------------------------------------------------------------------
+
+    if op_str not in res_def.supported_operations:
+        raise PolicyDeniedError(
+            f"Boundary rejects decision: operation {op_str!r} "
+            f"not supported on resource {resource_name!r}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 9 — authoritative policy action ceiling
+    #
+    # A custom PolicyEngine must never be able to turn a policy DENY
+    # into an ALLOW.
+    # ------------------------------------------------------------------
+
     if rp.action_decision(op_str) != ActionDecision.ALLOW:
         raise PolicyDeniedError(
             f"Boundary rejects decision: operation {op_str!r} is not "
@@ -312,16 +338,108 @@ def _validate_decision(
             f"{resource_name!r}."
         )
 
-    # ---- Policy row-rule ceiling ----
-    # Every authoritative policy row rule must survive into the
-    # engine's enforced_filter after actor references are resolved.
+    # ------------------------------------------------------------------
+    # Invariant 1 — allowed_fields must exist in registry
+    # ------------------------------------------------------------------
+
+    unknown_allowed = [
+        field
+        for field in decision.allowed_fields
+        if field not in valid_fields
+    ]
+
+    if unknown_allowed:
+        raise PolicyError(
+            f"Boundary rejects decision: allowed_fields contains fields "
+            f"not in registry for {resource_name!r}: "
+            f"{unknown_allowed}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 2 — RESTRICTED fields can never be authorized
+    # ------------------------------------------------------------------
+
+    restricted_allowed = [
+        field
+        for field in decision.allowed_fields
+        if field in restricted_fields
+    ]
+
+    if restricted_allowed:
+        raise PolicyError(
+            f"Boundary rejects decision: allowed_fields contains "
+            f"RESTRICTED fields for {resource_name!r}: "
+            f"{restricted_allowed}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 3 — policy field ceiling
+    #
+    # The final decision cannot authorize a field which is not in the
+    # authoritative policy's allowed set, and denied fields can never
+    # become authorized again.
+    # ------------------------------------------------------------------
+
+    effective_allowed_fields = (
+        set(rp.allowed_fields) - set(rp.denied_fields)
+    )
+
+    unauthorized_allowed = [
+        field
+        for field in decision.allowed_fields
+        if field not in effective_allowed_fields
+    ]
+
+    if unauthorized_allowed:
+        raise PolicyError(
+            f"Boundary rejects decision: allowed_fields contains fields "
+            f"not permitted by frozen policy for {resource_name!r}: "
+            f"{unauthorized_allowed}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 10 — agent-controlled intent filters
+    #
+    # The AI agent supplies these filters. They must be explicitly
+    # permitted by the authoritative policy.
+    # ------------------------------------------------------------------
+
+    requested_filter_fields = set(request.intent.filters or {})
+    filterable_fields = set(rp.effective_filterable_fields())
+
+    unauthorized_filters = [
+        field
+        for field in requested_filter_fields
+        if field not in filterable_fields or field in restricted_fields
+    ]
+
+    if unauthorized_filters:
+        raise PolicyError(
+            f"Boundary rejects intent: filters contain fields not "
+            f"authorized by policy for {resource_name!r}: "
+            f"{sorted(unauthorized_filters)}."
+        )
+
+    # ------------------------------------------------------------------
+    # Invariant 6 — mandatory policy row-rule ceiling
+    #
+    # Every policy row rule must survive into the final enforced_filter
+    # after actor references are resolved.
+    #
+    # Extra restrictive predicates are allowed, but mandatory policy
+    # predicates cannot be omitted, weakened, or replaced.
+    # ------------------------------------------------------------------
+
     try:
         required_predicates = (
-            rp.enforced_filter().resolve(principal).predicates
+            rp.enforced_filter()
+            .resolve(principal)
+            .predicates
         )
     except Exception as exc:
         raise PolicyError(
-            "Boundary could not resolve authoritative policy row rules."
+            "Boundary could not resolve authoritative policy "
+            "row rules."
         ) from exc
 
     actual_predicates = decision.enforced_filter.predicates
@@ -336,98 +454,135 @@ def _validate_decision(
 
         if not present:
             raise PolicyError(
-                "Boundary rejects decision: a mandatory policy row rule "
-                f"is missing or weakened: "
-                f"{required.field.name!r} {required.operator.value!r} "
+                "Boundary rejects decision: a mandatory policy row "
+                "rule is missing or weakened (field/operator/value mismatch): "
+                f"{required.field.name!r} "
+                f"{required.operator.value!r} "
                 f"{required.value!r}."
             )
-    # ---- Invariants 4 + 5 (enforced_filter fields and tenant predicate) ----
+
+    # ------------------------------------------------------------------
+    # Invariants 4 + 5 — enforced filter integrity + tenant isolation
+    # ------------------------------------------------------------------
+
     tenant_key = res_def.tenant_key()
     tenant_predicate_found = False
 
     for pred in decision.enforced_filter.predicates:
         field_name = pred.field.name
 
+        # Invariant 4a — filter field must exist in registry.
         if field_name not in valid_fields:
             raise PolicyError(
-                f"Boundary rejects decision: enforced_filter references unknown "
-                f"field {field_name!r} on resource {resource_name!r}."
+                f"Boundary rejects decision: enforced_filter references "
+                f"unknown field {field_name!r} on resource "
+                f"{resource_name!r}."
             )
 
+        # Invariant 4b — RESTRICTED fields cannot appear in filters.
         if field_name in restricted_fields:
             raise PolicyError(
-                f"Boundary rejects decision: enforced_filter references RESTRICTED "
-                f"field {field_name!r} on resource {resource_name!r}."
+                f"Boundary rejects decision: enforced_filter references "
+                f"RESTRICTED field {field_name!r} on resource "
+                f"{resource_name!r}."
             )
 
+        # Invariant 5 — tenant predicate must be EQ against the
+        # authenticated principal's resolved tenant_id.
         if tenant_key and field_name == tenant_key:
             if pred.operator != PredicateOperator.EQ:
                 raise PolicyError(
-                    f"Boundary rejects decision: enforced_filter tenant predicate on "
-                    f"{tenant_key!r} uses operator {pred.operator!r} — must be EQ."
+                    f"Boundary rejects decision: enforced_filter tenant "
+                    f"predicate on {tenant_key!r} uses operator "
+                    f"{pred.operator!r} — must be EQ."
                 )
+
             if pred.value != principal.tenant_id:
                 raise PolicyError(
-                    f"Boundary rejects decision: enforced_filter tenant predicate "
-                    f"value {pred.value!r} does not match principal tenant_id "
-                    f"{principal.tenant_id!r} — cross-tenant capability not permitted."
+                    f"Boundary rejects decision: enforced_filter tenant "
+                    f"predicate value {pred.value!r} does not match "
+                    f"principal tenant_id {principal.tenant_id!r} — "
+                    "cross-tenant capability not permitted."
                 )
+
             tenant_predicate_found = True
 
     if tenant_key and not tenant_predicate_found:
         raise PolicyError(
-            f"Boundary rejects decision: resource {resource_name!r} is tenant-scoped "
-            f"(tenant key: {tenant_key!r}) but enforced_filter has no tenant predicate."
+            f"Boundary rejects decision: resource {resource_name!r} "
+            f"is tenant-scoped (tenant key: {tenant_key!r}) but "
+            "enforced_filter has no tenant predicate."
         )
 
-    # ---- Invariant 7 (decision_resource provenance) ----
+    # ------------------------------------------------------------------
+    # Invariant 11 — decision resource provenance
+    # ------------------------------------------------------------------
+
     if not decision.decision_resource:
         raise PolicyError(
-            "Boundary rejects decision: decision_resource is missing or empty. "
-            "A PolicyEngine must set decision_resource on every ALLOW decision."
+            "Boundary rejects decision: decision_resource is missing "
+            "or empty. A PolicyEngine must set decision_resource on "
+            "every ALLOW decision."
         )
+
     if decision.decision_resource != resource_name:
         raise PolicyError(
-            f"Boundary rejects decision: decision_resource={decision.decision_resource!r} "
+            f"Boundary rejects decision: "
+            f"decision_resource={decision.decision_resource!r} "
             f"does not match request resource {resource_name!r}."
         )
 
-    # ---- Invariant 8 (decision_operation provenance) ----
+    # ------------------------------------------------------------------
+    # Invariant 12 — decision operation provenance
+    # ------------------------------------------------------------------
+
     if not decision.decision_operation:
         raise PolicyError(
-            "Boundary rejects decision: decision_operation is missing or empty. "
-            "A PolicyEngine must set decision_operation on every ALLOW decision."
+            "Boundary rejects decision: decision_operation is missing "
+            "or empty. A PolicyEngine must set decision_operation on "
+            "every ALLOW decision."
         )
+
     if decision.decision_operation != op_str:
         raise PolicyError(
-            f"Boundary rejects decision: decision_operation={decision.decision_operation!r} "
+            f"Boundary rejects decision: "
+            f"decision_operation={decision.decision_operation!r} "
             f"does not match request operation {op_str!r}."
         )
 
-    # ---- Invariants 9 + 10 (policy name/version provenance) ----
+    # ------------------------------------------------------------------
+    # Invariants 13 + 14 — policy provenance
+    # ------------------------------------------------------------------
+
     if not decision.policy_name or decision.policy_name == "unknown":
         raise PolicyError(
-            "Boundary rejects decision: policy_name is missing or 'unknown'. "
-            "A PolicyEngine must set policy_name on every ALLOW decision."
+            "Boundary rejects decision: policy_name is missing "
+            "or 'unknown'. A PolicyEngine must set policy_name on "
+            "every ALLOW decision."
         )
+
     if decision.policy_name != frozen_policy.name:
         raise PolicyError(
-            f"Boundary rejects decision: decision.policy_name={decision.policy_name!r} "
-            f"does not match frozen policy name {frozen_policy.name!r}."
+            f"Boundary rejects decision: "
+            f"decision.policy_name={decision.policy_name!r} "
+            f"does not match frozen policy name "
+            f"{frozen_policy.name!r}."
         )
 
     if not decision.policy_version or decision.policy_version == "unknown":
         raise PolicyError(
-            "Boundary rejects decision: policy_version is missing or 'unknown'. "
-            "A PolicyEngine must set policy_version on every ALLOW decision."
+            "Boundary rejects decision: policy_version is missing "
+            "or 'unknown'. A PolicyEngine must set policy_version on "
+            "every ALLOW decision."
         )
+
     if decision.policy_version != frozen_policy.version:
         raise PolicyError(
-            f"Boundary rejects decision: decision.policy_version={decision.policy_version!r} "
-            f"does not match frozen policy version {frozen_policy.version!r}."
+            f"Boundary rejects decision: "
+            f"decision.policy_version={decision.policy_version!r} "
+            f"does not match frozen policy version "
+            f"{frozen_policy.version!r}."
         )
-
-
 # ---------------------------------------------------------------------------
 # DataFenceBoundary
 # ---------------------------------------------------------------------------
@@ -481,7 +636,7 @@ class DataFenceBoundary:
         capability_ttl_seconds: int = 300,
         capability_audience: str = "datafence",
         authoritative_policy: DataFencePolicy | None = None,
-    ) -> "DataFenceBoundary":
+    ) -> DataFenceBoundary:
         """Create and validate a boundary.
 
         Raises:
