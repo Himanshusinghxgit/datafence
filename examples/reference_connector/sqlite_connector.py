@@ -61,9 +61,7 @@ class SQLiteConnector:
                 f"Invalid signature on capability {capability.execution_id!r}"
             )
         if capability.is_expired():
-            raise CapabilityVerificationError(
-                f"Expired capability {capability.execution_id!r}"
-            )
+            raise CapabilityVerificationError(f"Expired capability {capability.execution_id!r}")
         if capability.audience != self._expected_audience:
             raise CapabilityVerificationError("Capability audience mismatch")
 
@@ -162,26 +160,35 @@ def create_demo_database(
             customer_id INTEGER NOT NULL, account_number TEXT NOT NULL, balance REAL NOT NULL
         )
     """)
-    cur.executemany("INSERT INTO customers VALUES (?,?,?,?,?,?)", [
-        (1, "tenant_a", "Alice Johnson", "alice@a.com", "123-45-6789", "ACC-A-001"),
-        (2, "tenant_a", "Bob Smith",     "bob@a.com",   "234-56-7890", "ACC-A-002"),
-        (3, "tenant_b", "Charlie Brown", "charlie@b.com","345-67-8901","ACC-B-001"),
-        (4, "tenant_b", "Diana Prince",  "diana@b.com",  "456-78-9012","ACC-B-002"),
-    ])
-    cur.executemany("INSERT INTO transactions VALUES (?,?,?,?,?,?,?)", [
-        (1, "tenant_a", 1, "Amazon",      49.99, "2024-01-15 10:30:00", "4532-xxxx"),
-        (2, "tenant_a", 1, "Starbucks",   5.50,  "2024-01-15 14:20:00", "4532-xxxx"),
-        (3, "tenant_a", 2, "Target",      125.00,"2024-01-16 09:15:00", "4532-yyyy"),
-        (4, "tenant_b", 3, "Walmart",     75.25, "2024-01-15 11:00:00", "5555-xxxx"),
-        (5, "tenant_b", 3, "Shell Gas",   45.00, "2024-01-16 08:30:00", "5555-xxxx"),
-        (6, "tenant_b", 4, "Apple Store", 999.00,"2024-01-16 15:45:00", "5555-yyyy"),
-    ])
-    cur.executemany("INSERT INTO accounts VALUES (?,?,?,?,?)", [
-        (1, "tenant_a", 1, "ACC-A-001", 5000.00),
-        (2, "tenant_a", 2, "ACC-A-002", 12000.00),
-        (3, "tenant_b", 3, "ACC-B-001", 8000.00),
-        (4, "tenant_b", 4, "ACC-B-002", 25000.00),
-    ])
+    cur.executemany(
+        "INSERT INTO customers VALUES (?,?,?,?,?,?)",
+        [
+            (1, "tenant_a", "Alice Johnson", "alice@a.com", "123-45-6789", "ACC-A-001"),
+            (2, "tenant_a", "Bob Smith", "bob@a.com", "234-56-7890", "ACC-A-002"),
+            (3, "tenant_b", "Charlie Brown", "charlie@b.com", "345-67-8901", "ACC-B-001"),
+            (4, "tenant_b", "Diana Prince", "diana@b.com", "456-78-9012", "ACC-B-002"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO transactions VALUES (?,?,?,?,?,?,?)",
+        [
+            (1, "tenant_a", 1, "Amazon", 49.99, "2024-01-15 10:30:00", "4532-xxxx"),
+            (2, "tenant_a", 1, "Starbucks", 5.50, "2024-01-15 14:20:00", "4532-xxxx"),
+            (3, "tenant_a", 2, "Target", 125.00, "2024-01-16 09:15:00", "4532-yyyy"),
+            (4, "tenant_b", 3, "Walmart", 75.25, "2024-01-15 11:00:00", "5555-xxxx"),
+            (5, "tenant_b", 3, "Shell Gas", 45.00, "2024-01-16 08:30:00", "5555-xxxx"),
+            (6, "tenant_b", 4, "Apple Store", 999.00, "2024-01-16 15:45:00", "5555-yyyy"),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO accounts VALUES (?,?,?,?,?)",
+        [
+            (1, "tenant_a", 1, "ACC-A-001", 5000.00),
+            (2, "tenant_a", 2, "ACC-A-002", 12000.00),
+            (3, "tenant_b", 3, "ACC-B-001", 8000.00),
+            (4, "tenant_b", 4, "ACC-B-002", 25000.00),
+        ],
+    )
     conn.commit()
     conn.close()
     return SQLiteConnector(database_path, signing_key, expected_audience)

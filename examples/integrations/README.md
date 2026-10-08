@@ -60,10 +60,10 @@ from datafence.core.principal import Principal
 tool = DataFenceOpenAITool(boundary)
 
 # In your message loop, when the model calls the tool:
-principal = Principal(id="user:alice", tenant_id="acme")   # from YOUR auth
+principal = Principal(id="user:alice", tenant_id="acme")  # from YOUR auth
 result_json = tool.handle_call(
     principal=principal,
-    arguments_json=tool_call.function.arguments,   # from the model
+    arguments_json=tool_call.function.arguments,  # from the model
 )
 # result_json contains the signed capability — pass it to your connector.
 ```
@@ -110,7 +110,7 @@ time** — a LangChain agent cannot change it during the conversation.
 from datafence.integrations.langchain_tool import DataFenceLangChainTool
 from datafence.core.principal import Principal
 
-principal = Principal(id="user:alice", tenant_id="acme")   # bound here
+principal = Principal(id="user:alice", tenant_id="acme")  # bound here
 tool = DataFenceLangChainTool(boundary=boundary, principal=principal)
 
 # Direct use:

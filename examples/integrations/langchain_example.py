@@ -53,23 +53,25 @@ from datafence.integrations.langchain_tool import DataFenceLangChainTool
 # Shared boundary setup
 # ---------------------------------------------------------------------------
 
+
 def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     registry = ResourceRegistry()
     registry.register(
         ResourceDefinition(
             "reports",
             fields={
-                "id":        FieldDefinition("id", "integer"),
+                "id": FieldDefinition("id", "integer"),
                 "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "title":     FieldDefinition("title", "string"),
+                "title": FieldDefinition("title", "string"),
                 "department": FieldDefinition("department", "string"),
-                "period":    FieldDefinition("period", "string"),
+                "period": FieldDefinition("period", "string"),
             },
             supported_operations=("read",),
         )
     )
     policy = DataFencePolicy(
-        "reports-policy", "1.0",
+        "reports-policy",
+        "1.0",
         {
             "reports": ResourcePolicy(
                 "reports",
@@ -83,7 +85,9 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     engine = DataFencePolicyEngine(policy, registry=registry)
     signing_key = token_bytes(32)
     boundary = DataFenceBoundary.create(
-        engine, registry, signing_key,
+        engine,
+        registry,
+        signing_key,
         capability_audience="reports-service",
     )
     return boundary, signing_key
@@ -92,6 +96,7 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
 # ---------------------------------------------------------------------------
 # Example A: direct tool use (no LangChain agent or API key needed)
 # ---------------------------------------------------------------------------
+
 
 def example_direct_tool_use() -> None:
     """
@@ -112,11 +117,13 @@ def example_direct_tool_use() -> None:
     print(f"   Principal : {principal.id} / tenant={principal.tenant_id}")
 
     # Tool accepts a JSON string (what a LangChain agent would produce)
-    query = json.dumps({
-        "resource": "reports",
-        "fields": ["id", "title", "department"],
-        "limit": 5,
-    })
+    query = json.dumps(
+        {
+            "resource": "reports",
+            "fields": ["id", "title", "department"],
+            "limit": 5,
+        }
+    )
 
     result_json = tool.run(query)
     result = json.loads(result_json)
@@ -135,11 +142,13 @@ def example_direct_tool_use() -> None:
         print(f"   reasons: {result['reasons']}")
 
     # Show that the agent cannot override the principal's tenant
-    tamper_query = json.dumps({
-        "resource": "reports",
-        "fields": ["id", "title"],
-        "filters": {"tenant_id": "evil-tenant"},   # agent tries to change tenant
-    })
+    tamper_query = json.dumps(
+        {
+            "resource": "reports",
+            "fields": ["id", "title"],
+            "filters": {"tenant_id": "evil-tenant"},  # agent tries to change tenant
+        }
+    )
     tamper_result = json.loads(tool.run(tamper_query))
     if tamper_result["status"] == "authorized":
         predicates = tamper_result.get("predicates", [])
@@ -154,6 +163,7 @@ def example_direct_tool_use() -> None:
 # ---------------------------------------------------------------------------
 # Example B: LangChain agent (requires OPENAI_API_KEY + langchain)
 # ---------------------------------------------------------------------------
+
 
 def example_with_langchain_agent() -> None:
     """
@@ -187,11 +197,13 @@ def example_with_langchain_agent() -> None:
 
     try:
         llm = ChatOpenAI(model="gpt-4o", temperature=0)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a helpful analyst. Use available tools to fetch data."),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "You are a helpful analyst. Use available tools to fetch data."),
+                ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
+        )
         agent = create_openai_functions_agent(llm, [lc_tool], prompt)
         executor = AgentExecutor(agent=agent, tools=[lc_tool], verbose=False)
 

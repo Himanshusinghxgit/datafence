@@ -39,7 +39,14 @@ def create_bank_policy() -> DataFencePolicyEngine:
             "transactions": ResourcePolicy(
                 resource="transactions",
                 actions={"read": ActionDecision.ALLOW},
-                allowed_fields=["id", "tenant_id", "customer_id", "merchant", "amount", "timestamp"],
+                allowed_fields=[
+                    "id",
+                    "tenant_id",
+                    "customer_id",
+                    "merchant",
+                    "amount",
+                    "timestamp",
+                ],
                 denied_fields=["card_number", "account_number"],
                 filterable_fields=["id", "tenant_id", "merchant", "customer_id"],
                 row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],

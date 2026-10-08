@@ -54,9 +54,7 @@ class InMemoryReferenceConnector:
             )
 
         if capability.is_expired():
-            raise CapabilityVerificationError(
-                f"Capability {capability.execution_id!r} has expired"
-            )
+            raise CapabilityVerificationError(f"Capability {capability.execution_id!r} has expired")
 
         if capability.audience != self._expected_audience:
             raise CapabilityVerificationError(
@@ -66,8 +64,7 @@ class InMemoryReferenceConnector:
 
         if capability.operation != Operation.READ:
             raise NotImplementedError(
-                "InMemoryReferenceConnector only supports READ, "
-                f"got {capability.operation!r}"
+                f"InMemoryReferenceConnector only supports READ, got {capability.operation!r}"
             )
 
         rows = self._data.get(capability.resource, [])
@@ -75,8 +72,7 @@ class InMemoryReferenceConnector:
         rows = rows[: capability.limit]
 
         result_rows = [
-            {k: v for k, v in row.items() if k in capability.selected_fields}
-            for row in rows
+            {k: v for k, v in row.items() if k in capability.selected_fields} for row in rows
         ]
 
         return ConnectorResult(
@@ -96,9 +92,7 @@ class InMemoryReferenceConnector:
             return rows
 
         return [
-            row
-            for row in rows
-            if all(self._matches(row, constraint) for constraint in constraints)
+            row for row in rows if all(self._matches(row, constraint) for constraint in constraints)
         ]
 
     @staticmethod

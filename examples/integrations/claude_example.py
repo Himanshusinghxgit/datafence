@@ -45,17 +45,18 @@ from datafence.integrations.anthropic_tool import DataFenceAnthropicTool
 # Shared boundary setup
 # ---------------------------------------------------------------------------
 
+
 def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     registry = ResourceRegistry()
     registry.register(
         ResourceDefinition(
             "documents",
             fields={
-                "id":        FieldDefinition("id", "integer"),
+                "id": FieldDefinition("id", "integer"),
                 "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "title":     FieldDefinition("title", "string"),
-                "author":    FieldDefinition("author", "string"),
-                "category":  FieldDefinition("category", "string"),
+                "title": FieldDefinition("title", "string"),
+                "author": FieldDefinition("author", "string"),
+                "category": FieldDefinition("category", "string"),
             },
             supported_operations=("read",),
         )
@@ -64,8 +65,10 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     from datafence import DataFencePolicy as _P
     from datafence import ResourcePolicy as _R
     from datafence import RowRule as _RR
+
     policy = _P(
-        "docs-policy", "1.0",
+        "docs-policy",
+        "1.0",
         {
             "documents": _R(
                 "documents",
@@ -79,7 +82,9 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     engine = DataFencePolicyEngine(policy, registry=registry)
     signing_key = token_bytes(32)
     boundary = DataFenceBoundary.create(
-        engine, registry, signing_key,
+        engine,
+        registry,
+        signing_key,
         capability_audience="docs-service",
     )
     return boundary, signing_key
@@ -88,6 +93,7 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
 # ---------------------------------------------------------------------------
 # Example A: direct tool call (no live Anthropic call required)
 # ---------------------------------------------------------------------------
+
 
 def example_direct_tool_call() -> None:
     """
@@ -146,6 +152,7 @@ def example_direct_tool_call() -> None:
 # ---------------------------------------------------------------------------
 # Example B: live Anthropic call (requires ANTHROPIC_API_KEY)
 # ---------------------------------------------------------------------------
+
 
 def example_with_live_claude() -> None:
     """

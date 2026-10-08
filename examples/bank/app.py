@@ -36,16 +36,63 @@ def separator(title: str) -> None:
 # ---------------------------------------------------------------------------
 BANKING_DATA = {
     "transactions": [
-        {"id": 1, "tenant_id": "bank_a", "customer_id": 101, "merchant": "Amazon", "amount": 49.99, "timestamp": "2026-01-15 10:30:00", "card_number": "4532-xxxx-xxxx-3333", "account_number": "ACC-A-001"},
-        {"id": 2, "tenant_id": "bank_a", "customer_id": 101, "merchant": "Starbucks", "amount": 5.50, "timestamp": "2026-01-15 14:20:00", "card_number": "4532-xxxx-xxxx-3333", "account_number": "ACC-A-001"},
-        {"id": 3, "tenant_id": "bank_b", "customer_id": 201, "merchant": "Walmart", "amount": 75.25, "timestamp": "2026-01-15 11:00:00", "card_number": "5555-xxxx-xxxx-9999", "account_number": "ACC-B-001"},
+        {
+            "id": 1,
+            "tenant_id": "bank_a",
+            "customer_id": 101,
+            "merchant": "Amazon",
+            "amount": 49.99,
+            "timestamp": "2026-01-15 10:30:00",
+            "card_number": "4532-xxxx-xxxx-3333",
+            "account_number": "ACC-A-001",
+        },
+        {
+            "id": 2,
+            "tenant_id": "bank_a",
+            "customer_id": 101,
+            "merchant": "Starbucks",
+            "amount": 5.50,
+            "timestamp": "2026-01-15 14:20:00",
+            "card_number": "4532-xxxx-xxxx-3333",
+            "account_number": "ACC-A-001",
+        },
+        {
+            "id": 3,
+            "tenant_id": "bank_b",
+            "customer_id": 201,
+            "merchant": "Walmart",
+            "amount": 75.25,
+            "timestamp": "2026-01-15 11:00:00",
+            "card_number": "5555-xxxx-xxxx-9999",
+            "account_number": "ACC-B-001",
+        },
     ],
     "customers": [
-        {"id": 101, "tenant_id": "bank_a", "name": "Alice Johnson", "email": "alice@bank-a.example", "ssn": "123-45-6789", "account_number": "ACC-A-001"},
-        {"id": 201, "tenant_id": "bank_b", "name": "Bob Smith", "email": "bob@bank-b.example", "ssn": "987-65-4321", "account_number": "ACC-B-001"},
+        {
+            "id": 101,
+            "tenant_id": "bank_a",
+            "name": "Alice Johnson",
+            "email": "alice@bank-a.example",
+            "ssn": "123-45-6789",
+            "account_number": "ACC-A-001",
+        },
+        {
+            "id": 201,
+            "tenant_id": "bank_b",
+            "name": "Bob Smith",
+            "email": "bob@bank-b.example",
+            "ssn": "987-65-4321",
+            "account_number": "ACC-B-001",
+        },
     ],
     "accounts": [
-        {"id": 1, "tenant_id": "bank_a", "customer_id": 101, "account_number": "ACC-A-001", "balance": 5000.00},
+        {
+            "id": 1,
+            "tenant_id": "bank_a",
+            "customer_id": 101,
+            "account_number": "ACC-A-001",
+            "balance": 5000.00,
+        },
     ],
 }
 
@@ -123,6 +170,7 @@ def main() -> None:
         Intent("transactions", Operation.READ, fields=["id", "merchant"]),
     )
     import dataclasses
+
     tampered = dataclasses.replace(cap, resource="accounts")
     try:
         connector.execute(tampered)

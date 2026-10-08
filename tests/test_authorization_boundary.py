@@ -80,6 +80,7 @@ def test_customer_verifier_rejects_tampering():
         Principal("user:1", "tenant-a"), Intent("customers", Operation.READ)
     )
     import dataclasses
+
     tampered = dataclasses.replace(capability, resource="other_resource")
     with pytest.raises(CapabilityVerificationError):
         CapabilityVerifier(key).verify(tampered)
@@ -136,6 +137,5 @@ def test_unknown_yaml_operator_fails_closed():
 def test_actor_not_in_public_api():
     """Actor alias has been removed — Principal is the canonical type."""
     import datafence
-    assert not hasattr(datafence, "Actor"), (
-        "Actor must not be in the public API — use Principal"
-    )
+
+    assert not hasattr(datafence, "Actor"), "Actor must not be in the public API — use Principal"

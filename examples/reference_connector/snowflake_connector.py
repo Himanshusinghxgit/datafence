@@ -45,8 +45,12 @@ class SnowflakeConnector:
         self._dict_cursor = sf.DictCursor
 
         params: dict[str, Any] = {"account": account, "user": user, **kwargs}
-        for k, v in [("database", database), ("schema", schema),
-                     ("warehouse", warehouse), ("role", role)]:
+        for k, v in [
+            ("database", database),
+            ("schema", schema),
+            ("warehouse", warehouse),
+            ("role", role),
+        ]:
             if v:
                 params[k] = v
         self._conn = sf.connect(**params)

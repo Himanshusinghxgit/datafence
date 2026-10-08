@@ -72,7 +72,8 @@ def _make_registry() -> ResourceRegistry:
                 "name": FieldDefinition("name", "string"),
                 "email": FieldDefinition("email", "string"),
                 "ssn": FieldDefinition(
-                    "ssn", "string",
+                    "ssn",
+                    "string",
                     classification=__import__("datafence").DataClassification.RESTRICTED,
                 ),
             },
@@ -131,7 +132,9 @@ def _make_boundary(
     engine = _make_policy(registry)
     key = token_bytes(32)
     boundary = DataFenceBoundary.create(
-        engine, registry, key,
+        engine,
+        registry,
+        key,
         capability_ttl_seconds=ttl,
         capability_audience=audience,
     )
@@ -189,8 +192,20 @@ class TestAuthorization:
         connector = InMemoryReferenceConnector(
             {
                 "customers": [
-                    {"id": 1, "tenant_id": "tenant-a", "name": "Alice", "email": "a@a.com", "ssn": "X"},
-                    {"id": 2, "tenant_id": "tenant-b", "name": "Bob",   "email": "b@b.com", "ssn": "Y"},
+                    {
+                        "id": 1,
+                        "tenant_id": "tenant-a",
+                        "name": "Alice",
+                        "email": "a@a.com",
+                        "ssn": "X",
+                    },
+                    {
+                        "id": 2,
+                        "tenant_id": "tenant-b",
+                        "name": "Bob",
+                        "email": "b@b.com",
+                        "ssn": "Y",
+                    },
                 ]
             },
             signing_key=key,
@@ -240,6 +255,7 @@ class TestAuthorization:
                 Principal("user:1", "tenant-a"),
                 Intent("customers", Operation.INSERT),
             )
+
     def test_row_limit_capped_by_policy(self) -> None:
         boundary, _, _ = _make_boundary()
         cap = boundary.authorize(
@@ -281,26 +297,30 @@ class TestCapabilityIntegrity:
 
     def test_tampered_resource_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, resource="orders").verify_signature(key)
 
     def test_tampered_operation_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, operation=Operation.INSERT).verify_signature(key)
 
     def test_tampered_fields_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, selected_fields=["id", "ssn"]).verify_signature(key)
 
     def test_tampered_predicate_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         tampered = dataclasses.replace(
             cap,
             predicates=[{"field": "tenant_id", "operator": "=", "value": "tenant-b"}],
@@ -309,46 +329,53 @@ class TestCapabilityIntegrity:
 
     def test_tampered_limit_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, limit=99999).verify_signature(key)
 
     def test_tampered_tenant_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         new_actor = dataclasses.replace(cap.actor, tenant_id="tenant-evil")
         assert not dataclasses.replace(cap, actor=new_actor).verify_signature(key)
 
     def test_tampered_policy_version_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, policy_version="evil-version").verify_signature(key)
 
     def test_tampered_expiry_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         new_expiry = datetime.now(timezone.utc) + timedelta(days=365)
         assert not dataclasses.replace(cap, expires_at=new_expiry).verify_signature(key)
 
     def test_tampered_audience_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, audience="evil-service").verify_signature(key)
 
     def test_tampered_nonce_invalidates_signature(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not dataclasses.replace(cap, nonce="attacker-chosen").verify_signature(key)
 
     def test_expired_capability_rejected_by_verifier(self) -> None:
         boundary, key, _ = _make_boundary(ttl=1)
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         expired = dataclasses.replace(
             cap, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
         )
@@ -357,15 +384,17 @@ class TestCapabilityIntegrity:
 
     def test_wrong_audience_rejected_by_verifier(self) -> None:
         boundary, key, _ = _make_boundary(audience="service-a")
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         with pytest.raises(CapabilityVerificationError, match="audience"):
             CapabilityVerifier(key, expected_audience="service-b").verify(cap)
 
     def test_wrong_key_rejected_by_verifier(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         with pytest.raises(CapabilityVerificationError, match="signature"):
             CapabilityVerifier(token_bytes(32), expected_audience="test-service").verify(cap)
 
@@ -380,11 +409,13 @@ class TestCapabilityIntegrity:
 
     def test_connector_rejects_tampered_capability(self) -> None:
         boundary, key, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         forged = dataclasses.replace(cap, resource="orders")
-        connector = InMemoryReferenceConnector({}, signing_key=key,
-                                               expected_audience="test-service")
+        connector = InMemoryReferenceConnector(
+            {}, signing_key=key, expected_audience="test-service"
+        )
         with pytest.raises(CapabilityVerificationError):
             connector.execute(forged)
 
@@ -412,18 +443,22 @@ class TestPredicateLosslessness:
                 supported_operations=("read",),
             )
         )
-        policy = DataFencePolicy("p", "1", {
-            "metrics": ResourcePolicy(
-                "metrics",
-                actions={"read": ActionDecision.ALLOW},
-                allowed_fields=["id", "tenant_id", "value"],
-                row_rules=[
-                    RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id"),
-                    RowRule("value", op, value),
-                ],
-                max_rows=100,
-            )
-        })
+        policy = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "metrics": ResourcePolicy(
+                    "metrics",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "value"],
+                    row_rules=[
+                        RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id"),
+                        RowRule("value", op, value),
+                    ],
+                    max_rows=100,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(policy, registry=reg)
         key = token_bytes(32)
         return DataFenceBoundary.create(engine, reg, key, capability_audience="test-service"), key
@@ -506,14 +541,14 @@ class TestRegistryFailClosed:
     def test_unknown_resource_denied(self) -> None:
         boundary, _, _ = _make_boundary()
         with pytest.raises(PolicyDeniedError):
-            boundary.authorize(Principal("u", "t"),
-                               Intent("nonexistent_table", Operation.READ))
+            boundary.authorize(Principal("u", "t"), Intent("nonexistent_table", Operation.READ))
 
     def test_unknown_field_denied(self) -> None:
         boundary, _, _ = _make_boundary()
         with pytest.raises(PolicyDeniedError):
-            boundary.authorize(Principal("u", "t"),
-                               Intent("customers", Operation.READ, fields=["id", "ghost"]))
+            boundary.authorize(
+                Principal("u", "t"), Intent("customers", Operation.READ, fields=["id", "ghost"])
+            )
 
     def test_registry_mismatch_prevents_boundary_creation(self) -> None:
         reg1 = _make_registry()
@@ -534,16 +569,19 @@ class TestRegistryFailClosed:
 
     def test_unknown_yaml_operator_fails_closed(self) -> None:
         with pytest.raises(ValueError, match="operator"):
-            YAMLPolicyLoader.from_dict({
-                "name": "p", "version": "1",
-                "resources": {
-                    "customers": {
-                        "actions": {"read": "allow"},
-                        "fields": {"allow": ["id"]},
-                        "rows": [{"field": "id", "operator": "TYPO_OP", "value": 1}],
-                    }
-                },
-            })
+            YAMLPolicyLoader.from_dict(
+                {
+                    "name": "p",
+                    "version": "1",
+                    "resources": {
+                        "customers": {
+                            "actions": {"read": "allow"},
+                            "fields": {"allow": ["id"]},
+                            "rows": [{"field": "id", "operator": "TYPO_OP", "value": 1}],
+                        }
+                    },
+                }
+            )
 
     def test_malformed_policy_decision_fails_closed(self) -> None:
         """A policy engine that returns garbage must not produce an AuthorizedExecution."""
@@ -566,8 +604,7 @@ class TestRegistryFailClosed:
         boundary._capability_audience = "x"
 
         with pytest.raises(PolicyError):
-            boundary.authorize(Principal("u", "t"),
-                               Intent("customers", Operation.READ))
+            boundary.authorize(Principal("u", "t"), Intent("customers", Operation.READ))
 
 
 # ===========================================================================
@@ -585,8 +622,9 @@ class TestIdentityModel:
         principal = Principal("user:1", "tenant-a")
         intent = Intent("customers", Operation.READ, filters={"tenant_id": "tenant-b"})
         cap = boundary.authorize(principal, intent)
-        enforced = {c["field"]: c["value"]
-                    for c in cap.filter_constraints() if c["operator"] == "="}
+        enforced = {
+            c["field"]: c["value"] for c in cap.filter_constraints() if c["operator"] == "="
+        }
         assert enforced.get("tenant_id") == "tenant-a"
 
     def test_llm_cannot_choose_principal_id(self) -> None:
@@ -597,8 +635,9 @@ class TestIdentityModel:
 
     def test_authorized_execution_carries_no_raw_sql(self) -> None:
         boundary, _, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         assert not hasattr(cap, "raw_sql")
 
     def test_principal_is_immutable(self) -> None:
@@ -608,14 +647,16 @@ class TestIdentityModel:
 
     def test_authorized_execution_is_immutable(self) -> None:
         boundary, _, _ = _make_boundary()
-        cap = boundary.authorize(Principal("user:1", "tenant-a"),
-                                 Intent("customers", Operation.READ, ["id"]))
+        cap = boundary.authorize(
+            Principal("user:1", "tenant-a"), Intent("customers", Operation.READ, ["id"])
+        )
         with pytest.raises((TypeError, dataclasses.FrozenInstanceError)):
             cap.resource = "hacked"  # type: ignore[misc]
 
     def test_actor_removed_from_public_api(self) -> None:
         """Actor alias has been removed — Principal is the only identity type."""
         import datafence
+
         assert not hasattr(datafence, "Actor"), (
             "Actor must not be in the public API — use Principal"
         )
@@ -628,7 +669,7 @@ class TestIdentityModel:
 
 class TestArchitectureBoundary:
     def test_boundary_has_no_execute_method(self) -> None:
-        boundary, _ , _ = _make_boundary()
+        boundary, _, _ = _make_boundary()
         assert not hasattr(boundary, "execute"), (
             "DataFenceBoundary must NOT have execute() — "
             "execution belongs to the customer connector"
@@ -637,7 +678,8 @@ class TestArchitectureBoundary:
     def test_boundary_stores_no_connector(self) -> None:
         boundary, _, _ = _make_boundary()
         connector_attrs = [
-            a for a in vars(boundary)
+            a
+            for a in vars(boundary)
             if any(x in a.lower() for x in ("connector", "connection", "cursor", "db"))
         ]
         assert connector_attrs == []
@@ -645,11 +687,25 @@ class TestArchitectureBoundary:
     def test_boundary_stores_no_db_credentials(self) -> None:
         boundary, _, _ = _make_boundary()
         cred_attrs = [
-            a for a in vars(boundary)
-            if any(x in a.lower() for x in
-                   ("password", "conninfo", "dsn", "host", "port",
-                    "database", "schema", "warehouse", "bucket",
-                    "access_key", "secret_key", "token"))
+            a
+            for a in vars(boundary)
+            if any(
+                x in a.lower()
+                for x in (
+                    "password",
+                    "conninfo",
+                    "dsn",
+                    "host",
+                    "port",
+                    "database",
+                    "schema",
+                    "warehouse",
+                    "bucket",
+                    "access_key",
+                    "secret_key",
+                    "token",
+                )
+            )
         ]
         assert cred_attrs == []
 
@@ -676,43 +732,55 @@ class TestArchitectureBoundary:
         import inspect
 
         import datafence.core.boundary as mod
+
         source = inspect.getsource(mod)
         for lib in ("psycopg", "sqlite3", "boto3", "pyathena", "snowflake"):
             assert lib not in source, f"core.boundary must not import {lib!r}"
 
     def test_legacy_types_not_in_public_api(self) -> None:
         import datafence
-        for name in ("DataFence", "AllowedRequest", "DeniedRequest",
-                     "ExecutionPlan", "ExecutionResult", "SimplePolicyEngine",
-                     "ConnectorError", "ExecutionError"):
+
+        for name in (
+            "DataFence",
+            "AllowedRequest",
+            "DeniedRequest",
+            "ExecutionPlan",
+            "ExecutionResult",
+            "SimplePolicyEngine",
+            "ConnectorError",
+            "ExecutionError",
+        ):
             assert not hasattr(datafence, name), (
                 f"Legacy type {name!r} must not be in the public API"
             )
 
     def test_boundary_create_accepts_no_connector_param(self) -> None:
         import inspect
+
         sig = inspect.signature(DataFenceBoundary.create)
         connector_params = [p for p in sig.parameters if "connector" in p.lower()]
         assert connector_params == []
 
     def test_boundary_has_no_execute_in_class_definition(self) -> None:
         import inspect
+
         public_methods = {
-            n for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
+            n
+            for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
             if not n.startswith("_") and n != "create"
         }
         assert "execute" not in public_methods
 
     def test_boundary_public_surface_is_authorize_and_registry(self) -> None:
         import inspect
+
         public_methods = {
-            n for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
+            n
+            for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
             if not n.startswith("_") and n != "create"
         }
         unexpected = public_methods - {"authorize"}
-        assert unexpected == set(), (
-            f"Unexpected public methods on DataFenceBoundary: {unexpected}"
-        )
+        assert unexpected == set(), f"Unexpected public methods on DataFenceBoundary: {unexpected}"
 
 
 # ===========================================================================
@@ -725,9 +793,21 @@ class TestConnectorEndToEnd:
         boundary, key, _ = _make_boundary()
         data = {
             "customers": [
-                {"id": 1, "tenant_id": "tenant-a", "name": "Alice", "email": "a@a.com", "ssn": "111"},
-                {"id": 2, "tenant_id": "tenant-a", "name": "Bob",   "email": "b@a.com", "ssn": "222"},
-                {"id": 3, "tenant_id": "tenant-b", "name": "Carol", "email": "c@b.com", "ssn": "333"},
+                {
+                    "id": 1,
+                    "tenant_id": "tenant-a",
+                    "name": "Alice",
+                    "email": "a@a.com",
+                    "ssn": "111",
+                },
+                {"id": 2, "tenant_id": "tenant-a", "name": "Bob", "email": "b@a.com", "ssn": "222"},
+                {
+                    "id": 3,
+                    "tenant_id": "tenant-b",
+                    "name": "Carol",
+                    "email": "c@b.com",
+                    "ssn": "333",
+                },
             ],
             "orders": [
                 {"id": 10, "tenant_id": "tenant-a", "total": 99.99, "status": "shipped"},
@@ -794,6 +874,7 @@ class TestMCPSecurityInvariants:
             )
 
         from datafence.mcp.server import DataFenceMCPServer
+
         server = DataFenceMCPServer(
             boundary=boundary,
             server_name="test",
@@ -808,6 +889,7 @@ class TestMCPSecurityInvariants:
     def test_mcp_server_requires_principal_resolver(self) -> None:
         """Constructing DataFenceMCPServer without a resolver raises TypeError."""
         from datafence.mcp.server import DataFenceMCPServer
+
         boundary, _, _ = _make_boundary()
         with pytest.raises(TypeError, match="principal_resolver"):
             DataFenceMCPServer(boundary=boundary)
@@ -815,6 +897,7 @@ class TestMCPSecurityInvariants:
     def test_mcp_server_resolver_none_raises(self) -> None:
         """Passing principal_resolver=None explicitly must also raise."""
         from datafence.mcp.server import DataFenceMCPServer
+
         boundary, _, _ = _make_boundary()
         with pytest.raises(TypeError, match="principal_resolver"):
             DataFenceMCPServer(boundary=boundary, principal_resolver=None)
@@ -848,6 +931,7 @@ class TestMCPSecurityInvariants:
             "Expected an allowed response for a valid session context"
         )
         import json
+
         payload = json.loads(response["content"][0]["text"])
         assert payload["status"] == "authorized"
         # The capability actor must reflect the session_context principal,
@@ -869,6 +953,7 @@ class TestMCPSecurityInvariants:
         session context is provided — not fall back to any default identity.
         """
         from datafence.mcp.server import DataFenceMCPServer
+
         boundary, _, _ = _make_boundary()
 
         def strict_resolver(ctx: dict) -> Principal:
@@ -883,20 +968,22 @@ class TestMCPSecurityInvariants:
         response = server.handle_call_tool(
             tool_name="datafence_query",
             arguments={"resource": "customers"},
-            session_context={},   # empty — no authenticated context
+            session_context={},  # empty — no authenticated context
         )
         assert response.get("isError") is True
         import json
+
         payload = json.loads(response["content"][0]["text"])
         assert "error" in payload
 
     def test_mcp_resolver_returning_wrong_type_is_rejected(self) -> None:
         """Resolver must return Principal; non-Principal is rejected."""
         from datafence.mcp.server import DataFenceMCPServer
+
         boundary, _, _ = _make_boundary()
 
         def bad_resolver(ctx: dict) -> dict:  # type: ignore[return]
-            return {"id": "user:1", "tenant_id": "t"}   # dict, not Principal
+            return {"id": "user:1", "tenant_id": "t"}  # dict, not Principal
 
         server = DataFenceMCPServer(
             boundary=boundary,
@@ -916,6 +1003,7 @@ class TestMCPSecurityInvariants:
     def test_mcp_allowed_response_contains_capability_not_rows(self) -> None:
         """An allowed MCP response must describe the capability, never data rows."""
         import json
+
         server, _, _ = self._make_server()
         response = server.handle_call_tool(
             tool_name="datafence_query",
@@ -939,6 +1027,7 @@ class TestMCPSecurityInvariants:
     def test_mcp_denied_response_contains_reasons_not_rows(self) -> None:
         """A denied MCP response must contain denial reasons, not data."""
         import json
+
         server, _, _ = self._make_server()
         # Request a field that doesn't exist → denial
         response = server.handle_call_tool(
@@ -956,6 +1045,7 @@ class TestMCPSecurityInvariants:
     def test_mcp_unknown_tool_returns_error(self) -> None:
         """Calling a tool that was never registered must return an error."""
         import json
+
         server, _, _ = self._make_server()
         response = server.handle_call_tool(
             tool_name="nonexistent_tool",
@@ -973,6 +1063,7 @@ class TestMCPSecurityInvariants:
         not the JSON-RPC body.
         """
         from datafence.mcp.server import DataFenceMCPServer
+
         boundary, _, _ = _make_boundary()
 
         calls: list[dict] = []
@@ -987,16 +1078,18 @@ class TestMCPSecurityInvariants:
         )
         # The JSON-RPC request embeds a _session block under params
         # (as some MCP clients do). It must NOT reach the resolver.
-        server.handle_request({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "datafence_query",
-                "arguments": {"resource": "customers"},
-                "_session": {"user_id": "attacker:evil", "tenant_id": "evil"},
-            },
-        })
+        server.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "datafence_query",
+                    "arguments": {"resource": "customers"},
+                    "_session": {"user_id": "attacker:evil", "tenant_id": "evil"},
+                },
+            }
+        )
         # The resolver was called with an empty dict (None → {}), not _session.
         assert calls, "resolver should have been called"
         assert calls[0] == {}, (
@@ -1033,6 +1126,7 @@ class TestPackageBoundaryInvariants:
         It lives under examples/, which is not part of the installable package.
         """
         import datafence
+
         assert not hasattr(datafence, "InMemoryReferenceConnector"), (
             "Reference connectors must live under examples/, not in the core package"
         )
@@ -1056,10 +1150,18 @@ class TestPackageBoundaryInvariants:
         import inspect
         import pkgutil
 
-        db_libs = ("psycopg", "sqlite3", "boto3", "pyathena",
-                   "snowflake.connector", "pymysql", "pymongo")
+        db_libs = (
+            "psycopg",
+            "sqlite3",
+            "boto3",
+            "pyathena",
+            "snowflake.connector",
+            "pymysql",
+            "pymongo",
+        )
 
         import datafence.core as core_pkg
+
         violations: list[str] = []
         for _finder, mod_name, _ in pkgutil.walk_packages(
             core_pkg.__path__, prefix="datafence.core."
@@ -1073,8 +1175,8 @@ class TestPackageBoundaryInvariants:
             except Exception:
                 pass
 
-        assert violations == [], (
-            "Core modules must not import database drivers:\n" + "\n".join(violations)
+        assert violations == [], "Core modules must not import database drivers:\n" + "\n".join(
+            violations
         )
 
     def test_public_api_does_not_contain_legacy_types(self) -> None:
@@ -1082,15 +1184,16 @@ class TestPackageBoundaryInvariants:
         The public datafence namespace must not expose legacy v0.x types.
         """
         import datafence
+
         legacy_names = [
-            "DataFence",           # v0.3 top-level class
-            "AllowedRequest",      # v0.3 result type
-            "DeniedRequest",       # v0.3 result type
-            "ExecutionPlan",       # v0.3/v0.4 internal type
-            "ExecutionResult",     # v0.3/v0.4 internal type
+            "DataFence",  # v0.3 top-level class
+            "AllowedRequest",  # v0.3 result type
+            "DeniedRequest",  # v0.3 result type
+            "ExecutionPlan",  # v0.3/v0.4 internal type
+            "ExecutionResult",  # v0.3/v0.4 internal type
             "SimplePolicyEngine",  # v0.3 policy helper
-            "ConnectorError",      # v0.3 error
-            "ExecutionError",      # v0.3 error
+            "ConnectorError",  # v0.3 error
+            "ExecutionError",  # v0.3 error
         ]
         for name in legacy_names:
             assert not hasattr(datafence, name), (
@@ -1103,6 +1206,7 @@ class TestPackageBoundaryInvariants:
         the public datafence namespace.  They are implementation details.
         """
         import datafence
+
         internal_names = ["Request", "Decision"]
         for name in internal_names:
             assert not hasattr(datafence, name), (
@@ -1115,6 +1219,7 @@ class TestPackageBoundaryInvariants:
         needs: boundary, principal, intent, policy, registry, errors.
         """
         import datafence
+
         required = [
             "DataFenceBoundary",
             "Principal",
@@ -1131,9 +1236,7 @@ class TestPackageBoundaryInvariants:
             "DataFenceError",
         ]
         for name in required:
-            assert hasattr(datafence, name), (
-                f"Expected {name!r} in datafence public API"
-            )
+            assert hasattr(datafence, name), f"Expected {name!r} in datafence public API"
 
 
 # ===========================================================================
@@ -1195,9 +1298,7 @@ class TestCapabilityTokenCodec:
         data = json.loads(CapabilityToken.encode(cap))
         data["dfv"] = 99
         with pytest.raises(CapabilityVerificationError, match="version"):
-            CapabilityVerifier(key, expected_audience="test-service").verify_token(
-                json.dumps(data)
-            )
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(json.dumps(data))
 
     def test_malformed_json_rejected(self) -> None:
         boundary, key, _ = _make_boundary()
@@ -1224,9 +1325,7 @@ class TestCapabilityTokenCodec:
         data = json.loads(CapabilityToken.encode(cap))
         data["resource"] = "evil_table"
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test-service").verify_token(
-                json.dumps(data)
-            )
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(json.dumps(data))
 
     def test_token_tamper_roles_detected(self) -> None:
         """principal.roles are signed — role injection via token must be detected."""
@@ -1238,9 +1337,7 @@ class TestCapabilityTokenCodec:
         data = json.loads(CapabilityToken.encode(cap))
         data["actor_roles"] = ["admin", "superuser"]
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test-service").verify_token(
-                json.dumps(data)
-            )
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(json.dumps(data))
 
     def test_connector_verifies_without_boundary(self) -> None:
         """Connector can verify a token with only the key — no DataFence runtime needed."""
@@ -1258,22 +1355,30 @@ class TestCapabilityTokenCodec:
     def test_obligations_in_token(self) -> None:
         """Obligations from policy are carried in the token."""
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "audit_resource",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        reg.register(
+            ResourceDefinition(
+                "audit_resource",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        policy = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "audit_resource": ResourcePolicy(
+                    "audit_resource",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                    obligations={"audit": True, "notify": "compliance@example.com"},
+                )
             },
-            supported_operations=("read",),
-        ))
-        policy = DataFencePolicy("p", "1", {"audit_resource": ResourcePolicy(
-            "audit_resource",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-            obligations={"audit": True, "notify": "compliance@example.com"},
-        )})
+        )
         engine = DataFencePolicyEngine(policy, registry=reg)
         key = token_bytes(32)
         b = DataFenceBoundary.create(engine, reg, key, capability_audience="test-service")
@@ -1325,6 +1430,7 @@ class TestDeepImmutability:
 
     def test_principal_attributes_is_immutable_proxy(self) -> None:
         from types import MappingProxyType
+
         p = Principal("u", "t", attributes={"dept": "finance"})
         assert isinstance(p.attributes, MappingProxyType)
         with pytest.raises((TypeError, AttributeError)):
@@ -1384,21 +1490,29 @@ class TestMinKeyLength:
 
     def test_short_key_rejected_at_boundary_create(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "things",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        reg.register(
+            ResourceDefinition(
+                "things",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "things": ResourcePolicy(
+                    "things",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
             },
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {"things": ResourcePolicy(
-            "things",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ValueError, match="32"):
             DataFenceBoundary.create(engine, reg, b"too_short_key_123")
@@ -1419,65 +1533,93 @@ class TestPolicyCompilation:
 
     def test_policy_referencing_unknown_resource_rejected(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "real_resource",
-            fields={"id": FieldDefinition("id", "integer"),
-                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {
-            "real_resource": ResourcePolicy(
+        reg.register(
+            ResourceDefinition(
                 "real_resource",
-                actions={"read": ActionDecision.ALLOW},
-                allowed_fields=["id"],
-                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-                max_rows=10,
-            ),
-            "nonexistent_resource": ResourcePolicy(
-                "nonexistent_resource",
-                actions={"read": ActionDecision.ALLOW},
-                allowed_fields=["id"],
-                max_rows=10,
-            ),
-        })
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "real_resource": ResourcePolicy(
+                    "real_resource",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                ),
+                "nonexistent_resource": ResourcePolicy(
+                    "nonexistent_resource",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id"],
+                    max_rows=10,
+                ),
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ConfigurationError, match="nonexistent_resource"):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
 
     def test_policy_referencing_unknown_field_rejected(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "items",
-            fields={"id": FieldDefinition("id", "integer"),
-                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "ghost_field"],  # ghost_field doesn't exist
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        reg.register(
+            ResourceDefinition(
+                "items",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "ghost_field"],  # ghost_field doesn't exist
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ConfigurationError, match="ghost_field"):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
 
     def test_policy_referencing_unsupported_operation_rejected(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "things",
-            fields={"id": FieldDefinition("id", "integer"),
-                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True)},
-            supported_operations=("read",),  # only read supported
-        ))
-        pol = DataFencePolicy("p", "1", {"things": ResourcePolicy(
-            "things",
-            actions={"read": ActionDecision.ALLOW, "delete": ActionDecision.ALLOW},
-            allowed_fields=["id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        reg.register(
+            ResourceDefinition(
+                "things",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),  # only read supported
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "things": ResourcePolicy(
+                    "things",
+                    actions={"read": ActionDecision.ALLOW, "delete": ActionDecision.ALLOW},
+                    allowed_fields=["id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ConfigurationError, match="delete"):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
@@ -1488,13 +1630,17 @@ class TestPolicyFreeze:
 
     def test_policy_mutation_does_not_affect_serving_boundary(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "docs",
-            fields={"id": FieldDefinition("id", "integer"),
+        reg.register(
+            ResourceDefinition(
+                "docs",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
                     "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                    "title": FieldDefinition("title", "string")},
-            supported_operations=("read",),
-        ))
+                    "title": FieldDefinition("title", "string"),
+                },
+                supported_operations=("read",),
+            )
+        )
         rp = ResourcePolicy(
             "docs",
             actions={"read": ActionDecision.ALLOW},
@@ -1524,23 +1670,31 @@ class TestTenantIsolationEnforcement:
 
     def test_tenant_scoped_resource_without_row_rule_rejected(self) -> None:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "tenant_data",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "value": FieldDefinition("value", "string"),
-            },
-            supported_operations=("read",),
-        ))
+        reg.register(
+            ResourceDefinition(
+                "tenant_data",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "value": FieldDefinition("value", "string"),
+                },
+                supported_operations=("read",),
+            )
+        )
         # Policy allows read but has NO tenant row rule — must fail compilation
-        pol = DataFencePolicy("p", "1", {"tenant_data": ResourcePolicy(
-            "tenant_data",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "value"],
-            row_rules=[],  # missing tenant isolation
-            max_rows=100,
-        )})
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "tenant_data": ResourcePolicy(
+                    "tenant_data",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "value"],
+                    row_rules=[],  # missing tenant isolation
+                    max_rows=100,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ConfigurationError, match="tenant"):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
@@ -1548,19 +1702,29 @@ class TestTenantIsolationEnforcement:
     def test_non_tenant_resource_without_row_rule_allowed(self) -> None:
         """A resource with no tenant key does not require a tenant row rule."""
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "global_config",
-            fields={"key": FieldDefinition("key", "string"),
-                    "value": FieldDefinition("value", "string")},
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {"global_config": ResourcePolicy(
-            "global_config",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["key", "value"],
-            row_rules=[],  # no tenant key → no tenant row rule required
-            max_rows=100,
-        )})
+        reg.register(
+            ResourceDefinition(
+                "global_config",
+                fields={
+                    "key": FieldDefinition("key", "string"),
+                    "value": FieldDefinition("value", "string"),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "global_config": ResourcePolicy(
+                    "global_config",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["key", "value"],
+                    row_rules=[],  # no tenant key → no tenant row rule required
+                    max_rows=100,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         # Must NOT raise
         b = DataFenceBoundary.create(engine, reg, token_bytes(32))
@@ -1574,24 +1738,32 @@ class TestFilterAuthorization:
     def test_unauthorized_filter_field_denied(self) -> None:
         """Agent cannot filter on a field that is not in filterable_fields."""
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "products",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "name": FieldDefinition("name", "string"),
-                "cost": FieldDefinition("cost", "decimal"),
+        reg.register(
+            ResourceDefinition(
+                "products",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "name": FieldDefinition("name", "string"),
+                    "cost": FieldDefinition("cost", "decimal"),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "products": ResourcePolicy(
+                    "products",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "name", "cost"],
+                    filterable_fields=["id", "tenant_id"],  # cost and name not filterable
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=50,
+                )
             },
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("p", "1", {"products": ResourcePolicy(
-            "products",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "name", "cost"],
-            filterable_fields=["id", "tenant_id"],  # cost and name not filterable
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=50,
-        )})
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         key = token_bytes(32)
         b = DataFenceBoundary.create(engine, reg, key)
@@ -1626,27 +1798,37 @@ class TestDataClassificationSemantics:
 
     def test_restricted_field_auto_denied_even_if_in_allowed(self) -> None:
         from datafence import DataClassification
+
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "sensitive",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "secret": FieldDefinition(
-                    "secret", "string",
-                    classification=DataClassification.RESTRICTED,
-                ),
-            },
-            supported_operations=("read",),
-        ))
+        reg.register(
+            ResourceDefinition(
+                "sensitive",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "secret": FieldDefinition(
+                        "secret",
+                        "string",
+                        classification=DataClassification.RESTRICTED,
+                    ),
+                },
+                supported_operations=("read",),
+            )
+        )
         # Policy explicitly lists "secret" in allowed_fields — should be overridden
-        pol = DataFencePolicy("p", "1", {"sensitive": ResourcePolicy(
-            "sensitive",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "secret"],  # RESTRICTED field listed!
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "sensitive": ResourcePolicy(
+                    "sensitive",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "secret"],  # RESTRICTED field listed!
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         key = token_bytes(32)
         b = DataFenceBoundary.create(engine, reg, key)
@@ -1729,25 +1911,36 @@ class TestDeepImmutabilityNested:
         boundary, key, _ = _make_boundary()
         # Build boundary with obligations
         reg2 = ResourceRegistry()
-        reg2.register(ResourceDefinition(
-            "audited",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-            },
-            supported_operations=("read",),
-        ))
+        reg2.register(
+            ResourceDefinition(
+                "audited",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
         from datafence.core.policy import RowRule
-        pol2 = DataFencePolicy("p2", "1", {"audited": ResourcePolicy(
-            "audited",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-            obligations={"audit": True, "notify": "compliance@example.com"},
-        )})
+
+        pol2 = DataFencePolicy(
+            "p2",
+            "1",
+            {
+                "audited": ResourcePolicy(
+                    "audited",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                    obligations={"audit": True, "notify": "compliance@example.com"},
+                )
+            },
+        )
         engine2 = DataFencePolicyEngine(pol2, registry=reg2)
-        b2 = DataFenceBoundary.create(engine2, reg2, token_bytes(32), capability_audience="test-service")
+        b2 = DataFenceBoundary.create(
+            engine2, reg2, token_bytes(32), capability_audience="test-service"
+        )
         cap2 = b2.authorize(Principal("u", "t-a"), Intent("audited", Operation.READ))
         assert cap2.obligations["audit"] is True  # type: ignore[index]
         with pytest.raises(TypeError):
@@ -1756,25 +1949,36 @@ class TestDeepImmutabilityNested:
     def test_obligations_nested_value_immutable(self) -> None:
         """Nested lists/dicts inside obligations must also be immutable."""
         from datafence.core.policy import RowRule
+
         reg3 = ResourceRegistry()
-        reg3.register(ResourceDefinition(
-            "nested_obl",
-            fields={
-                "id": FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+        reg3.register(
+            ResourceDefinition(
+                "nested_obl",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol3 = DataFencePolicy(
+            "p3",
+            "1",
+            {
+                "nested_obl": ResourcePolicy(
+                    "nested_obl",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                    obligations={"tags": ["pii", "audit"]},  # list value
+                )
             },
-            supported_operations=("read",),
-        ))
-        pol3 = DataFencePolicy("p3", "1", {"nested_obl": ResourcePolicy(
-            "nested_obl",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-            obligations={"tags": ["pii", "audit"]},  # list value
-        )})
+        )
         engine3 = DataFencePolicyEngine(pol3, registry=reg3)
-        b3 = DataFenceBoundary.create(engine3, reg3, token_bytes(32), capability_audience="test-service")
+        b3 = DataFenceBoundary.create(
+            engine3, reg3, token_bytes(32), capability_audience="test-service"
+        )
         cap3 = b3.authorize(Principal("u", "t-a"), Intent("nested_obl", Operation.READ))
         # The tags list inside obligations must be a tuple (deep-frozen)
         tags = cap3.obligations["tags"]  # type: ignore[index]
@@ -1794,6 +1998,7 @@ class TestDeepImmutabilityNested:
     def test_principal_attributes_nested_dict_immutable(self) -> None:
         p = Principal("u", "t", attributes={"meta": {"x": 1}})
         from types import MappingProxyType
+
         assert isinstance(p.attributes["meta"], MappingProxyType)  # type: ignore[index]
         with pytest.raises(TypeError):
             p.attributes["meta"]["x"] = 99  # type: ignore[index]
@@ -1808,6 +2013,7 @@ class TestDeepImmutabilityNested:
     def test_principal_rejects_non_json_serialisable_attribute(self) -> None:
         """datetime, object(), bytes in attributes must be rejected at construction."""
         import datetime
+
         with pytest.raises(ValueError, match="JSON-serialisable"):
             Principal("u", "t", attributes={"ts": datetime.datetime.now()})
 
@@ -1819,17 +2025,21 @@ class TestDeepImmutabilityNested:
 
     def test_principal_accepts_valid_json_attributes(self) -> None:
         """All JSON-compatible types must be accepted."""
-        p = Principal("u", "t", attributes={
-            "str_val": "hello",
-            "int_val": 42,
-            "float_val": 3.14,
-            "bool_val": True,
-            "null_val": None,
-            "nested_dict": {"x": 1},
-            "nested_list": [1, 2, 3],
-        })
-        assert p.attributes["str_val"] == "hello"   # type: ignore[index]
-        assert p.attributes["float_val"] == 3.14   # type: ignore[index]
+        p = Principal(
+            "u",
+            "t",
+            attributes={
+                "str_val": "hello",
+                "int_val": 42,
+                "float_val": 3.14,
+                "bool_val": True,
+                "null_val": None,
+                "nested_dict": {"x": 1},
+                "nested_list": [1, 2, 3],
+            },
+        )
+        assert p.attributes["str_val"] == "hello"  # type: ignore[index]
+        assert p.attributes["float_val"] == 3.14  # type: ignore[index]
 
     def test_selected_fields_cannot_be_mutated(self) -> None:
         cap, _ = self._cap()
@@ -1859,31 +2069,40 @@ class TestTenantIsolationSemantics:
 
     def _reg_with_tenant(self) -> ResourceRegistry:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "items",
-            fields={
-                "id":        FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "value":     FieldDefinition("value", "string"),
-            },
-            supported_operations=("read",),
-        ))
+        reg.register(
+            ResourceDefinition(
+                "items",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "value": FieldDefinition("value", "string"),
+                },
+                supported_operations=("read",),
+            )
+        )
         return reg
 
     def _make_engine(self, reg: ResourceRegistry, row_rules: list) -> DataFencePolicyEngine:
-        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "value"],
-            row_rules=row_rules,
-            max_rows=10,
-        )})
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "value"],
+                    row_rules=row_rules,
+                    max_rows=10,
+                )
+            },
+        )
         return DataFencePolicyEngine(pol, registry=reg)
 
     def _should_fail(self, row_rules: list, match: str) -> None:
         reg = self._reg_with_tenant()
         engine = self._make_engine(reg, row_rules)
         from datafence.errors import ConfigurationError
+
         with pytest.raises(ConfigurationError, match=match):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
 
@@ -1895,14 +2114,14 @@ class TestTenantIsolationSemantics:
     # Correct invariant
     def test_eq_actor_tenant_id_accepted(self) -> None:
         from datafence.core.policy import RowRule
-        b = self._should_pass(
-            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
-        )
+
+        b = self._should_pass([RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")])
         assert isinstance(b, DataFenceBoundary)
 
     # Wrong operators
     def test_neq_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.NEQ, ":actor_tenant_id")],
             "EQ",
@@ -1910,6 +2129,7 @@ class TestTenantIsolationSemantics:
 
     def test_lt_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.LT, ":actor_tenant_id")],
             "EQ",
@@ -1917,6 +2137,7 @@ class TestTenantIsolationSemantics:
 
     def test_lte_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.LTE, ":actor_tenant_id")],
             "EQ",
@@ -1924,6 +2145,7 @@ class TestTenantIsolationSemantics:
 
     def test_gt_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.GT, ":actor_tenant_id")],
             "EQ",
@@ -1931,6 +2153,7 @@ class TestTenantIsolationSemantics:
 
     def test_gte_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.GTE, ":actor_tenant_id")],
             "EQ",
@@ -1938,6 +2161,7 @@ class TestTenantIsolationSemantics:
 
     def test_in_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.IN, [":actor_tenant_id"])],
             "EQ",
@@ -1945,6 +2169,7 @@ class TestTenantIsolationSemantics:
 
     def test_not_in_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.NOT_IN, [":actor_tenant_id"])],
             "EQ",
@@ -1952,6 +2177,7 @@ class TestTenantIsolationSemantics:
 
     def test_is_null_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.IS_NULL, None)],
             "EQ",
@@ -1959,6 +2185,7 @@ class TestTenantIsolationSemantics:
 
     def test_is_not_null_operator_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.IS_NOT_NULL, None)],
             "EQ",
@@ -1967,6 +2194,7 @@ class TestTenantIsolationSemantics:
     # Wrong values
     def test_literal_tenant_value_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.EQ, "hardcoded-tenant")],
             ":actor_tenant_id",
@@ -1974,6 +2202,7 @@ class TestTenantIsolationSemantics:
 
     def test_other_actor_attr_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.EQ, ":actor_id")],
             ":actor_tenant_id",
@@ -1982,6 +2211,7 @@ class TestTenantIsolationSemantics:
     def test_old_alias_actor_dot_tenant_rejected(self) -> None:
         """':actor.tenant_id' is no longer accepted — must use ':actor_tenant_id'."""
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.EQ, ":actor.tenant_id")],
             ":actor_tenant_id",
@@ -1989,6 +2219,7 @@ class TestTenantIsolationSemantics:
 
     def test_empty_value_rejected(self) -> None:
         from datafence.core.policy import RowRule
+
         self._should_fail(
             [RowRule("tenant_id", PredicateOperator.EQ, "")],
             ":actor_tenant_id",
@@ -1996,14 +2227,21 @@ class TestTenantIsolationSemantics:
 
     def test_no_tenant_rule_rejected(self) -> None:
         from datafence.errors import ConfigurationError
+
         reg = self._reg_with_tenant()
-        pol = DataFencePolicy("p", "1", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "value"],
-            row_rules=[],   # missing tenant rule
-            max_rows=10,
-        )})
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "value"],
+                    row_rules=[],  # missing tenant rule
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ConfigurationError, match="tenant"):
             DataFenceBoundary.create(engine, reg, token_bytes(32))
@@ -2011,9 +2249,8 @@ class TestTenantIsolationSemantics:
     def test_agent_filter_cannot_override_tenant_predicate(self) -> None:
         """After boundary is created, agent-supplied tenant filter is overridden by policy."""
         from datafence.core.policy import RowRule
-        b = self._should_pass(
-            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
-        )
+
+        b = self._should_pass([RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")])
         cap = b.authorize(
             Principal("u", "tenant-a"),
             Intent("items", Operation.READ, filters={"tenant_id": "evil-tenant"}),
@@ -2025,19 +2262,24 @@ class TestTenantIsolationSemantics:
     def test_tenant_predicate_tampering_detected_via_token(self) -> None:
         """Tampering the tenant predicate in the CapabilityToken fails HMAC."""
         from datafence.core.policy import RowRule
-        self._should_pass(
-            [RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")]
-        )
+
+        self._should_pass([RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")])
         key_bytes = token_bytes(32)
         # Need fresh boundary with known key
         reg2 = self._reg_with_tenant()
-        pol2 = DataFencePolicy("p", "1", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id", "value"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        pol2 = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id", "value"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine2 = DataFencePolicyEngine(pol2, registry=reg2)
         b2 = DataFenceBoundary.create(engine2, reg2, key_bytes)
         cap = b2.authorize(Principal("u", "tenant-a"), Intent("items", Operation.READ))
@@ -2266,9 +2508,9 @@ class TestCapabilityTokenStrictness:
     def test_predicates_missing_field_key_rejected(self) -> None:
         tok, _ = self._valid_token()
         with pytest.raises(CapabilityVerificationError):
-            CapabilityToken.decode(self._tamper(
-                tok, "predicates", [{"operator": "=", "value": "x"}]
-            ))
+            CapabilityToken.decode(
+                self._tamper(tok, "predicates", [{"operator": "=", "value": "x"}])
+            )
 
     def test_obligations_not_dict_rejected(self) -> None:
         tok, _ = self._valid_token()
@@ -2340,7 +2582,6 @@ class TestCapabilityTokenStrictness:
             cap.obligations["injected"] = "x"  # type: ignore[index]
 
 
-
 # ===========================================================================
 # 15. Boundary-level decision validation — malicious PolicyEngine
 # ===========================================================================
@@ -2358,35 +2599,41 @@ class _MaliciousBoundaryFixtures:
     @staticmethod
     def _reg() -> ResourceRegistry:
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "orders",
-            fields={
-                "id":        FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "total":     FieldDefinition("total", "decimal"),
-                "secret":    FieldDefinition(
-                    "secret", "string",
-                    classification=DataClassification.RESTRICTED,
-                ),
-            },
-            supported_operations=("read",),
-        ))
+        reg.register(
+            ResourceDefinition(
+                "orders",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "total": FieldDefinition("total", "decimal"),
+                    "secret": FieldDefinition(
+                        "secret",
+                        "string",
+                        classification=DataClassification.RESTRICTED,
+                    ),
+                },
+                supported_operations=("read",),
+            )
+        )
         return reg
 
     @classmethod
     def _authoritative_policy(cls, allowed_fields: list[str] | None = None) -> DataFencePolicy:
         """Return the authoritative policy the boundary will enforce."""
         from datafence.core.policy import RowRule
+
         return DataFencePolicy(
             cls._DEFAULT_POLICY_NAME,
             cls._DEFAULT_POLICY_VERSION,
-            {"orders": ResourcePolicy(
-                "orders",
-                actions={"read": ActionDecision.ALLOW},
-                allowed_fields=allowed_fields or ["id", "tenant_id"],
-                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-                max_rows=50,
-            )},
+            {
+                "orders": ResourcePolicy(
+                    "orders",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=allowed_fields or ["id", "tenant_id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=50,
+                )
+            },
         )
 
     @classmethod
@@ -2440,6 +2687,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_restricted_field_in_allowed_fields_blocked(self) -> None:
         """A PolicyEngine returning a RESTRICTED field must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2447,7 +2695,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 return _allow_decision(
-                    ["id", "secret"],   # 'secret' is RESTRICTED
+                    ["id", "secret"],  # 'secret' is RESTRICTED
                     (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
                 )
 
@@ -2457,6 +2705,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_unknown_field_in_allowed_fields_blocked(self) -> None:
         """A PolicyEngine returning a field not in the registry must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2474,6 +2723,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_multiple_unauthorized_fields_all_blocked(self) -> None:
         """Multiple bad fields in one decision — all rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2495,6 +2745,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_restricted_field_in_enforced_filter_blocked(self) -> None:
         """A PolicyEngine using a RESTRICTED field in the filter must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2538,6 +2789,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_missing_tenant_predicate_blocked(self) -> None:
         """A PolicyEngine omitting the mandatory tenant predicate must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2546,7 +2798,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 return _allow_decision(
                     ["id"],
-                    (),   # no predicates at all — missing tenant isolation
+                    (),  # no predicates at all — missing tenant isolation
                 )
 
         b = self._make(EvilEngine())
@@ -2555,6 +2807,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_cross_tenant_filter_blocked(self) -> None:
         """A PolicyEngine injecting another tenant's ID must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2572,6 +2825,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_wrong_tenant_filter_operator_neq_blocked(self) -> None:
         """A NEQ tenant predicate must be rejected even with the correct tenant_id."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2612,9 +2866,11 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 return _allow_decision(
                     ["id"],
-                    (Predicate(
-                        FieldRef("tenant_id"), PredicateOperator.IN, [principal.tenant_id]
-                    ),),
+                    (
+                        Predicate(
+                            FieldRef("tenant_id"), PredicateOperator.IN, [principal.tenant_id]
+                        ),
+                    ),
                 )
 
         b = self._make(EvilEngine())
@@ -2627,6 +2883,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_unsupported_operation_in_request_blocked(self) -> None:
         """Even if the engine returns ALLOW for an unsupported op, boundary rejects."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2650,6 +2907,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_empty_allowed_fields_in_allow_decision_blocked(self) -> None:
         """An ALLOW decision with empty allowed_fields must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2657,7 +2915,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 return _allow_decision(
-                    [],   # empty!
+                    [],  # empty!
                     (Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),),
                 )
 
@@ -2667,6 +2925,7 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
     def test_zero_row_limit_in_decision_blocked(self) -> None:
         """An ALLOW decision with row_limit=0 must be rejected."""
+
         class EvilEngine:
             @property
             def registry(self) -> Any:
@@ -2674,16 +2933,22 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
 
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 from datafence.core.resources import RowLimit as RL
+
                 # Bypass RowLimit's own positive-check by patching value via object.__setattr__
                 rl = object.__new__(RL)
                 object.__setattr__(rl, "value", 0)
                 from datafence.core.policy import PolicyDecision
+
                 return PolicyDecision(
                     effect=PolicyEffect.ALLOW,
                     allowed_fields=("id",),
-                    enforced_filter=Filter(predicates=(
-                        Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id),
-                    )),
+                    enforced_filter=Filter(
+                        predicates=(
+                            Predicate(
+                                FieldRef("tenant_id"), PredicateOperator.EQ, principal.tenant_id
+                            ),
+                        )
+                    ),
                     row_limit=rl,
                     policy_name="bad",
                     policy_version="1.0",
@@ -2713,18 +2978,26 @@ class TestBoundaryDecisionValidation(_MaliciousBoundaryFixtures):
         """Resources with no tenant key do not require a tenant predicate."""
 
         reg2 = ResourceRegistry()
-        reg2.register(ResourceDefinition(
-            "config",
-            fields={"key": FieldDefinition("key", "string")},
-            supported_operations=("read",),
-        ))
-        pol2 = DataFencePolicy("p", "1", {"config": ResourcePolicy(
-            "config",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["key"],
-            row_rules=[],   # no tenant key → no tenant row rule required
-            max_rows=10,
-        )})
+        reg2.register(
+            ResourceDefinition(
+                "config",
+                fields={"key": FieldDefinition("key", "string")},
+                supported_operations=("read",),
+            )
+        )
+        pol2 = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "config": ResourcePolicy(
+                    "config",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["key"],
+                    row_rules=[],  # no tenant key → no tenant row rule required
+                    max_rows=10,
+                )
+            },
+        )
         engine2 = DataFencePolicyEngine(pol2, registry=reg2)
         key2 = token_bytes(32)
         b2 = DataFenceBoundary.create(engine2, reg2, key2)
@@ -2772,6 +3045,7 @@ class TestNonceAndReplaySemantics:
         """Tampering with the nonce invalidates the HMAC."""
         cap, key = self._cap()
         import dataclasses
+
         tampered = dataclasses.replace(cap, nonce="replayed-nonce-0000")
         assert not tampered.verify_signature(key)
 
@@ -2781,9 +3055,7 @@ class TestNonceAndReplaySemantics:
         data = json.loads(token_str)
         data["nonce"] = "replayed"
         with pytest.raises(CapabilityVerificationError, match="signature"):
-            CapabilityVerifier(key, expected_audience="test-service").verify_token(
-                json.dumps(data)
-            )
+            CapabilityVerifier(key, expected_audience="test-service").verify_token(json.dumps(data))
 
     def test_capability_is_bearer_until_expiry(self) -> None:
         """A valid unexpired capability verifies without any nonce store."""
@@ -2791,12 +3063,13 @@ class TestNonceAndReplaySemantics:
         verifier = CapabilityVerifier(key, expected_audience="test-service")
         # Can be verified multiple times — it is a bearer token
         verifier.verify(cap)
-        verifier.verify(cap)   # second call — still valid (no nonce store)
+        verifier.verify(cap)  # second call — still valid (no nonce store)
 
     def test_expired_capability_rejected(self) -> None:
         """Expiry is enforced — an expired capability cannot be replayed."""
         import dataclasses
         from datetime import timedelta, timezone
+
         cap, key = self._cap(ttl=300)
         expired = dataclasses.replace(
             cap, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -2873,24 +3146,33 @@ class TestPolicyCeilingAndProvenance(_MaliciousBoundaryFixtures):
     ) -> tuple[DataFenceBoundary, ResourceRegistry]:
         """Build a fully frozen boundary with a single 'orders' resource."""
         from datafence.core.policy import RowRule
+
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "orders",
-            fields={
-                "id":        FieldDefinition("id", "integer"),
-                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "email":     FieldDefinition("email", "string"),
-                "total":     FieldDefinition("total", "decimal"),
+        reg.register(
+            ResourceDefinition(
+                "orders",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                    "email": FieldDefinition("email", "string"),
+                    "total": FieldDefinition("total", "decimal"),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "my-policy",
+            "2.0",
+            {
+                "orders": ResourcePolicy(
+                    "orders",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=policy_fields,
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=max_rows,
+                )
             },
-            supported_operations=("read",),
-        ))
-        pol = DataFencePolicy("my-policy", "2.0", {"orders": ResourcePolicy(
-            "orders",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=policy_fields,
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=max_rows,
-        )})
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         key = token_bytes(32)
         b = DataFenceBoundary.create(engine, reg, key, capability_audience="test")
@@ -2927,13 +3209,15 @@ class TestPolicyCeilingAndProvenance(_MaliciousBoundaryFixtures):
             def evaluate(self, principal: Any, intent: Any) -> Any:
                 return PolicyDecision.allow(
                     allowed_fields=allowed_fields,
-                    enforced_filter=Filter(predicates=(
-                        Predicate(
-                            FieldRef("tenant_id"),
-                            PredicateOperator.EQ,
-                            principal.tenant_id,
-                        ),
-                    )),
+                    enforced_filter=Filter(
+                        predicates=(
+                            Predicate(
+                                FieldRef("tenant_id"),
+                                PredicateOperator.EQ,
+                                principal.tenant_id,
+                            ),
+                        )
+                    ),
                     row_limit=RowLimit(row_limit_val),
                     policy_name=policy_name,
                     policy_version=policy_version,
@@ -3085,8 +3369,9 @@ class TestPolicyCeilingAndProvenance(_MaliciousBoundaryFixtures):
         """
         b, reg = self._frozen_boundary(["id"])
         b.policy_engine = self._evil_engine(  # type: ignore[assignment]
-            reg, ["id"],
-            decision_resource="",   # empty = missing provenance → rejected
+            reg,
+            ["id"],
+            decision_resource="",  # empty = missing provenance → rejected
             decision_operation="",
             policy_name="",
             policy_version="",
@@ -3101,18 +3386,31 @@ class TestPolicyCeilingAndProvenance(_MaliciousBoundaryFixtures):
     def test_builtin_engine_populates_provenance(self) -> None:
         """DataFencePolicyEngine must populate decision_resource and decision_operation."""
         from datafence.core.policy import RowRule
+
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition("items", fields={
-            "id": FieldDefinition("id", "integer"),
-            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-        }, supported_operations=("read",)))
-        pol = DataFencePolicy("provenance-test", "3.0", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id", "tenant_id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        reg.register(
+            ResourceDefinition(
+                "items",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "provenance-test",
+            "3.0",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id", "tenant_id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         decision = engine.evaluate(Principal("u", "t-a"), Intent("items", Operation.READ))
         assert decision.decision_resource == "items"
@@ -3153,30 +3451,39 @@ class TestStrictProvenanceWithCustomEngine:
             allowed_fields_ceiling = ["id", "total"]
 
         fields: dict[str, FieldDefinition] = {
-            "id":        FieldDefinition("id", "integer"),
+            "id": FieldDefinition("id", "integer"),
             "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-            "total":     FieldDefinition("total", "decimal"),
-            "email":     FieldDefinition("email", "string"),
-            "secret":    FieldDefinition("secret", "string",
-                             classification=DataClassification.RESTRICTED),
+            "total": FieldDefinition("total", "decimal"),
+            "email": FieldDefinition("email", "string"),
+            "secret": FieldDefinition(
+                "secret", "string", classification=DataClassification.RESTRICTED
+            ),
         }
         if extra_registry_fields:
             fields.update(extra_registry_fields)
 
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition(
-            "items",
-            fields=fields,
-            supported_operations=("read",),
-        ))
+        reg.register(
+            ResourceDefinition(
+                "items",
+                fields=fields,
+                supported_operations=("read",),
+            )
+        )
 
-        auth_policy = DataFencePolicy("auth-policy", "3.0", {"items": ResourcePolicy(
-            "items",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=allowed_fields_ceiling,
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=max_rows_ceiling,
-        )})
+        auth_policy = DataFencePolicy(
+            "auth-policy",
+            "3.0",
+            {
+                "items": ResourcePolicy(
+                    "items",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=allowed_fields_ceiling,
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=max_rows_ceiling,
+                )
+            },
+        )
 
         # Completely independent stub engine — shares no code with DataFencePolicyEngine
         class StubEngine:
@@ -3212,12 +3519,21 @@ class TestStrictProvenanceWithCustomEngine:
         policy_name: str = "auth-policy",
         policy_version: str = "3.0",
     ) -> PolicyDecision:
-        from datafence.core.resources import FieldRef, Filter, Predicate, PredicateOperator, RowLimit
+        from datafence.core.resources import (
+            FieldRef,
+            Filter,
+            Predicate,
+            PredicateOperator,
+            RowLimit,
+        )
+
         return PolicyDecision.allow(
             allowed_fields=allowed_fields,
-            enforced_filter=Filter(predicates=(
-                Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal_tenant),
-            )),
+            enforced_filter=Filter(
+                predicates=(
+                    Predicate(FieldRef("tenant_id"), PredicateOperator.EQ, principal_tenant),
+                )
+            ),
             row_limit=RowLimit(row_limit),
             policy_name=policy_name,
             policy_version=policy_version,
@@ -3227,8 +3543,10 @@ class TestStrictProvenanceWithCustomEngine:
 
     def _set_engine_decision(self, b: DataFenceBoundary, decision: PolicyDecision) -> None:
         """Replace the engine's evaluate() to return the given decision."""
+
         def _eval(principal: Any, intent: Any) -> Any:
             return decision
+
         b.policy_engine.evaluate = _eval  # type: ignore[method-assign]
 
     # ------------------------------------------------------------------
@@ -3365,10 +3683,16 @@ class TestStrictProvenanceWithCustomEngine:
         no ._policy and no authoritative_policy is provided.
         """
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition("things", fields={
-            "id": FieldDefinition("id", "integer"),
-            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-        }, supported_operations=("read",)))
+        reg.register(
+            ResourceDefinition(
+                "things",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
 
         class NoPolicyEngine:
             @property

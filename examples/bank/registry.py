@@ -30,13 +30,19 @@ def create_bank_registry() -> ResourceRegistry:
                 "tenant_id": FieldDefinition(
                     "tenant_id", "string", DataClassification.INTERNAL, is_tenant_key=True
                 ),
-                "customer_id": FieldDefinition("customer_id", "integer", DataClassification.INTERNAL),
+                "customer_id": FieldDefinition(
+                    "customer_id", "integer", DataClassification.INTERNAL
+                ),
                 "merchant": FieldDefinition("merchant", "string", DataClassification.PUBLIC),
                 "amount": FieldDefinition("amount", "decimal", DataClassification.CONFIDENTIAL),
                 "timestamp": FieldDefinition("timestamp", "datetime", DataClassification.INTERNAL),
                 # Sensitive — policy should deny access to these
-                "card_number": FieldDefinition("card_number", "string", DataClassification.RESTRICTED),
-                "account_number": FieldDefinition("account_number", "string", DataClassification.RESTRICTED),
+                "card_number": FieldDefinition(
+                    "card_number", "string", DataClassification.RESTRICTED
+                ),
+                "account_number": FieldDefinition(
+                    "account_number", "string", DataClassification.RESTRICTED
+                ),
             },
             supported_operations=("read",),
         )
@@ -54,7 +60,9 @@ def create_bank_registry() -> ResourceRegistry:
                 "name": FieldDefinition("name", "string", DataClassification.INTERNAL),
                 "email": FieldDefinition("email", "string", DataClassification.CONFIDENTIAL),
                 "ssn": FieldDefinition("ssn", "string", DataClassification.RESTRICTED),
-                "account_number": FieldDefinition("account_number", "string", DataClassification.RESTRICTED),
+                "account_number": FieldDefinition(
+                    "account_number", "string", DataClassification.RESTRICTED
+                ),
             },
             supported_operations=("read",),
         )
@@ -69,8 +77,12 @@ def create_bank_registry() -> ResourceRegistry:
                 "tenant_id": FieldDefinition(
                     "tenant_id", "string", DataClassification.INTERNAL, is_tenant_key=True
                 ),
-                "customer_id": FieldDefinition("customer_id", "integer", DataClassification.INTERNAL),
-                "account_number": FieldDefinition("account_number", "string", DataClassification.RESTRICTED),
+                "customer_id": FieldDefinition(
+                    "customer_id", "integer", DataClassification.INTERNAL
+                ),
+                "account_number": FieldDefinition(
+                    "account_number", "string", DataClassification.RESTRICTED
+                ),
                 "balance": FieldDefinition("balance", "decimal", DataClassification.RESTRICTED),
             },
             supported_operations=("read",),

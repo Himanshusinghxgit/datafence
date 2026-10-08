@@ -63,6 +63,7 @@ class DataFenceLangChainTool:
         self._langchain_available = False
         try:
             import importlib.util
+
             self._langchain_available = importlib.util.find_spec("langchain.tools") is not None
         except (ImportError, ValueError):
             self._langchain_available = False

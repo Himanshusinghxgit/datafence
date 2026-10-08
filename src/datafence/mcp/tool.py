@@ -32,9 +32,9 @@ class ToolResult:
 
     allowed: bool
     capability: dict[str, Any] | None
-    token: str | None                   # portable signed CapabilityToken
+    token: str | None  # portable signed CapabilityToken
     denial_reasons: list[str]
-    request_id: str                     # correlation ID (execution_id on success)
+    request_id: str  # correlation ID (execution_id on success)
 
     def to_dict(self) -> dict[str, Any]:
         return {

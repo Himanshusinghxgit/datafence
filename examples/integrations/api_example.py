@@ -88,6 +88,7 @@ OpenAPI docs: http://localhost:8000/docs
 # Part 2 — HTTP client example
 # ---------------------------------------------------------------------------
 
+
 def example_http_client() -> None:
     """
     Demonstrate calling the DataFence /authorize endpoint.

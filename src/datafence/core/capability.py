@@ -214,6 +214,7 @@ def _canon_predicates(predicates: tuple[dict[str, Any], ...]) -> str:
 # Deep-immutability helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_json_compatible(value: Any, path: str = "") -> None:
     """
     Raise ValueError if *value* contains types that cannot be JSON-serialised.
@@ -228,17 +229,13 @@ def _validate_json_compatible(value: Any, path: str = "") -> None:
         return
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise ValueError(
-                f"Non-finite float at {path!r}: {value!r}"
-            )
+            raise ValueError(f"Non-finite float at {path!r}: {value!r}")
     elif isinstance(value, (str, int)):
         return
     elif isinstance(value, dict):
         for k, v in value.items():
             if not isinstance(k, str):
-                raise ValueError(
-                    f"Dict key at {path!r} must be str, got {type(k).__name__!r}"
-                )
+                raise ValueError(f"Dict key at {path!r} must be str, got {type(k).__name__!r}")
             _validate_json_compatible(v, f"{path}.{k}")
     elif isinstance(value, (list, tuple)):
         for i, item in enumerate(value):
@@ -273,6 +270,7 @@ def _deep_freeze(value: Any) -> Any:
     if isinstance(value, set):
         return frozenset(value)
     return value  # str, int, float, bool, None, bytes — already immutable
+
 
 # ---------------------------------------------------------------------------
 # AuthorizedExecution — deeply immutable signed capability
@@ -320,7 +318,7 @@ class AuthorizedExecution:
 
     # Authorized access — immutable tuples, not lists
     selected_fields: tuple[str, ...]
-    predicates: tuple[Any, ...] = ()   # tuple of MappingProxyType (deep-frozen dicts)
+    predicates: tuple[Any, ...] = ()  # tuple of MappingProxyType (deep-frozen dicts)
     limit: int = 0
 
     # Policy provenance — immutable tuples
@@ -331,7 +329,7 @@ class AuthorizedExecution:
     # These are metadata for the connector/application; DataFence does not enforce them.
     # They ARE included in the HMAC to prevent stripping.
     # Stored as a deep-frozen MappingProxyType — cannot be mutated after issuance.
-    obligations: Any = field(default_factory=dict)   # coerced to MappingProxyType
+    obligations: Any = field(default_factory=dict)  # coerced to MappingProxyType
 
     # Capability lifecycle / audience binding
     expires_at: datetime | None = None
@@ -465,11 +463,11 @@ class AuthorizedExecution:
         """
         if len(signing_key) < MIN_KEY_BYTES:
             raise ValueError(
-                f"signing_key must be at least {MIN_KEY_BYTES} bytes "
-                f"(got {len(signing_key)})"
+                f"signing_key must be at least {MIN_KEY_BYTES} bytes (got {len(signing_key)})"
             )
 
         from datetime import timedelta
+
         created_at = datetime.now(timezone.utc)
         effective_expires = expires_at or created_at + timedelta(minutes=5)
         # Normalise expires_at to UTC
@@ -553,6 +551,7 @@ class AuthorizedExecution:
         # Coerce policy_decisions to tuple
         if not isinstance(self.policy_decisions, tuple):
             object.__setattr__(self, "policy_decisions", tuple(self.policy_decisions))
+
 
 # ---------------------------------------------------------------------------
 # CapabilityToken — portable wire representation with embedded signature
@@ -677,9 +676,7 @@ class CapabilityToken:
         try:
             return CapabilityToken._reconstruct(data)
         except (KeyError, TypeError, ValueError) as exc:
-            raise CapabilityVerificationError(
-                f"Malformed capability token: {exc}"
-            ) from exc
+            raise CapabilityVerificationError(f"Malformed capability token: {exc}") from exc
 
     @staticmethod
     def decode_and_verify(
@@ -714,9 +711,18 @@ class CapabilityToken:
 
         # --- Require all mandatory fields ---
         _required = [
-            "execution_id", "created_at", "actor_id", "actor_tenant_id",
-            "resource", "operation", "selected_fields", "limit",
-            "expires_at", "audience", "nonce", "sig",
+            "execution_id",
+            "created_at",
+            "actor_id",
+            "actor_tenant_id",
+            "resource",
+            "operation",
+            "selected_fields",
+            "limit",
+            "expires_at",
+            "audience",
+            "nonce",
+            "sig",
         ]
         for key in _required:
             if key not in data:
@@ -726,25 +732,19 @@ class CapabilityToken:
         def _require_str(key: str) -> str:
             v = data[key]
             if not isinstance(v, str):
-                raise ValueError(
-                    f"token field {key!r} must be str, got {type(v).__name__!r}"
-                )
+                raise ValueError(f"token field {key!r} must be str, got {type(v).__name__!r}")
             return v
 
         def _require_int(key: str) -> int:
             v = data[key]
             if not isinstance(v, int) or isinstance(v, bool):
-                raise ValueError(
-                    f"token field {key!r} must be int, got {type(v).__name__!r}"
-                )
+                raise ValueError(f"token field {key!r} must be int, got {type(v).__name__!r}")
             return v
 
         def _require_list(key: str) -> list:
             v = data.get(key, [])
             if not isinstance(v, list):
-                raise ValueError(
-                    f"token field {key!r} must be list, got {type(v).__name__!r}"
-                )
+                raise ValueError(f"token field {key!r} must be list, got {type(v).__name__!r}")
             return v
 
         def _parse_dt(s: str | None) -> datetime | None:
@@ -774,9 +774,7 @@ class CapabilityToken:
         actor_roles_raw = _require_list("actor_roles")
         for i, r in enumerate(actor_roles_raw):
             if not isinstance(r, str):
-                raise ValueError(
-                    f"actor_roles[{i}] must be str, got {type(r).__name__!r}"
-                )
+                raise ValueError(f"actor_roles[{i}] must be str, got {type(r).__name__!r}")
 
         # Attributes: must be a dict with string keys
         actor_attrs_raw = data.get("actor_attributes") or {}
@@ -786,45 +784,33 @@ class CapabilityToken:
             )
         for k in actor_attrs_raw:
             if not isinstance(k, str):
-                raise ValueError(
-                    f"actor_attributes key must be str, got {type(k).__name__!r}"
-                )
+                raise ValueError(f"actor_attributes key must be str, got {type(k).__name__!r}")
 
         # selected_fields: list of strings
         fields_raw = _require_list("selected_fields")
         for i, f in enumerate(fields_raw):
             if not isinstance(f, str):
-                raise ValueError(
-                    f"selected_fields[{i}] must be str, got {type(f).__name__!r}"
-                )
+                raise ValueError(f"selected_fields[{i}] must be str, got {type(f).__name__!r}")
 
         # predicates: list of dicts
         preds_raw = _require_list("predicates")
         for i, p in enumerate(preds_raw):
             if not isinstance(p, dict):
-                raise ValueError(
-                    f"predicates[{i}] must be dict, got {type(p).__name__!r}"
-                )
+                raise ValueError(f"predicates[{i}] must be dict, got {type(p).__name__!r}")
             for req_k in ("field", "operator"):
                 if not isinstance(p.get(req_k), str):
-                    raise ValueError(
-                        f"predicates[{i}].{req_k!r} must be str"
-                    )
+                    raise ValueError(f"predicates[{i}].{req_k!r} must be str")
 
         # policy_decisions: list of strings
         decisions_raw = _require_list("policy_decisions")
         for i, d in enumerate(decisions_raw):
             if not isinstance(d, str):
-                raise ValueError(
-                    f"policy_decisions[{i}] must be str, got {type(d).__name__!r}"
-                )
+                raise ValueError(f"policy_decisions[{i}] must be str, got {type(d).__name__!r}")
 
         # obligations: dict with string keys
         obls_raw = data.get("obligations") or {}
         if not isinstance(obls_raw, dict):
-            raise ValueError(
-                f"obligations must be dict, got {type(obls_raw).__name__!r}"
-            )
+            raise ValueError(f"obligations must be dict, got {type(obls_raw).__name__!r}")
 
         # Signature: non-empty hex string
         sig_hex = _require_str("sig")
@@ -861,11 +847,11 @@ class CapabilityToken:
             resource=resource,
             operation=operation,
             selected_fields=tuple(fields_raw),
-            predicates=tuple(preds_raw),       # __post_init__ will deep-freeze
+            predicates=tuple(preds_raw),  # __post_init__ will deep-freeze
             limit=limit,
             policy_version=policy_version,
             policy_decisions=tuple(decisions_raw),
-            obligations=obls_raw,              # __post_init__ will deep-freeze
+            obligations=obls_raw,  # __post_init__ will deep-freeze
             expires_at=expires_at,
             audience=audience,
             nonce=nonce,
@@ -880,6 +866,7 @@ class CapabilityToken:
 
 class CapabilityVerificationError(Exception):
     """Raised when capability verification fails (forged, expired, mis-targeted, malformed)."""
+
     pass
 
 
@@ -944,9 +931,7 @@ class CapabilityVerifier:
                 f"expected {self._expected_audience!r}"
             )
         if capability.is_expired():
-            raise CapabilityVerificationError(
-                f"Capability {capability.execution_id!r} has expired"
-            )
+            raise CapabilityVerificationError(f"Capability {capability.execution_id!r} has expired")
         if not capability.verify_signature(self._signing_key):
             raise CapabilityVerificationError(
                 f"Capability {capability.execution_id!r} has an invalid signature — "

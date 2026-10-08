@@ -33,10 +33,14 @@ def create_registry() -> ResourceRegistry:
                     DataClassification.INTERNAL,
                     is_tenant_key=True,
                 ),
-                "customer_id": FieldDefinition("customer_id", "integer", DataClassification.INTERNAL),
+                "customer_id": FieldDefinition(
+                    "customer_id", "integer", DataClassification.INTERNAL
+                ),
                 "total": FieldDefinition("total", "decimal", DataClassification.CONFIDENTIAL),
                 "status": FieldDefinition("status", "string", DataClassification.INTERNAL),
-                "created_at": FieldDefinition("created_at", "datetime", DataClassification.INTERNAL),
+                "created_at": FieldDefinition(
+                    "created_at", "datetime", DataClassification.INTERNAL
+                ),
             },
             supported_operations=("read",),
         )
@@ -56,7 +60,9 @@ def create_registry() -> ResourceRegistry:
                 ),
                 "title": FieldDefinition("title", "string", DataClassification.INTERNAL),
                 "status": FieldDefinition("status", "string", DataClassification.INTERNAL),
-                "created_at": FieldDefinition("created_at", "datetime", DataClassification.INTERNAL),
+                "created_at": FieldDefinition(
+                    "created_at", "datetime", DataClassification.INTERNAL
+                ),
                 "internal_notes": FieldDefinition(
                     "internal_notes", "string", DataClassification.CONFIDENTIAL
                 ),

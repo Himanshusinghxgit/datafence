@@ -49,6 +49,7 @@ from datafence.errors import DataFenceError
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+
 class AuthorizationRequest(BaseModel):  # type: ignore[misc]
     """Untrusted Intent from the AI agent or API caller.
 
@@ -65,13 +66,13 @@ class AuthorizationRequest(BaseModel):  # type: ignore[misc]
     limit: int | None = Field(None, ge=1, description="Maximum rows (bounded by policy).")
 
     if field_validator is not None:
+
         @field_validator("operation")
         @classmethod
         def _validate_operation(cls, v: str) -> str:
             if v.lower() != "read":
                 raise ValueError(
-                    f"Operation {v!r} is not supported in v0.1. "
-                    "Only 'read' is supported."
+                    f"Operation {v!r} is not supported in v0.1. Only 'read' is supported."
                 )
             return "read"
 
@@ -267,9 +268,7 @@ def create_api(
             ) from None
 
         token_str = CapabilityToken.encode(capability)
-        expires_iso = (
-            capability.expires_at.isoformat() if capability.expires_at else None
-        )
+        expires_iso = capability.expires_at.isoformat() if capability.expires_at else None
         return AuthorizeResponse(
             token=token_str,
             execution_id=capability.execution_id,
@@ -333,6 +332,4 @@ def create_api(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(
-        "Configure a boundary and call create_api() from an application entrypoint"
-    )
+    raise SystemExit("Configure a boundary and call create_api() from an application entrypoint")

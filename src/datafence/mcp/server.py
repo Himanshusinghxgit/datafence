@@ -84,9 +84,7 @@ class DataFenceMCPServer:
         self._principal_resolver: Callable[[dict], Principal] = principal_resolver
 
         self._query_tool = DataFenceQueryTool(boundary=boundary)
-        self._tools: dict[str, DataFenceQueryTool] = {
-            self._query_tool.tool_name: self._query_tool
-        }
+        self._tools: dict[str, DataFenceQueryTool] = {self._query_tool.tool_name: self._query_tool}
 
     def register_tool(self, tool: DataFenceQueryTool) -> None:
         """Register an additional DataFenceQueryTool under its tool_name."""
@@ -215,8 +213,7 @@ class DataFenceMCPServer:
         principal = self._principal_resolver(session_context)
         if not isinstance(principal, Principal):
             raise TypeError(
-                f"principal_resolver must return Principal, "
-                f"got {type(principal).__name__!r}"
+                f"principal_resolver must return Principal, got {type(principal).__name__!r}"
             )
         return principal
 

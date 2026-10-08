@@ -35,6 +35,7 @@ from typing import Any
 # Attribute validation and deep-freeze helpers
 # ---------------------------------------------------------------------------
 
+
 def _validate_json_compatible_attrs(attrs: dict, path: str = "attributes") -> None:
     """
     Validate that ``attrs`` contains only JSON-compatible types.
@@ -47,9 +48,7 @@ def _validate_json_compatible_attrs(attrs: dict, path: str = "attributes") -> No
     """
     for k, v in attrs.items():
         if not isinstance(k, str):
-            raise ValueError(
-                f"Principal.{path} key must be str, got {type(k).__name__!r}"
-            )
+            raise ValueError(f"Principal.{path} key must be str, got {type(k).__name__!r}")
         _validate_json_value(v, f"{path}.{k}")
 
 
@@ -67,9 +66,7 @@ def _validate_json_value(value: Any, path: str) -> None:
     if isinstance(value, dict):
         for k, v in value.items():
             if not isinstance(k, str):
-                raise ValueError(
-                    f"Principal.{path} key must be str, got {type(k).__name__!r}"
-                )
+                raise ValueError(f"Principal.{path} key must be str, got {type(k).__name__!r}")
             _validate_json_value(v, f"{path}.{k}")
         return
     if isinstance(value, (list, tuple)):
@@ -77,8 +74,7 @@ def _validate_json_value(value: Any, path: str) -> None:
             _validate_json_value(item, f"{path}[{i}]")
         return
     raise ValueError(
-        f"Principal.{path}: value of type {type(value).__name__!r} "
-        "is not JSON-serialisable"
+        f"Principal.{path}: value of type {type(value).__name__!r} is not JSON-serialisable"
     )
 
 

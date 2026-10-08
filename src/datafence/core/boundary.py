@@ -108,9 +108,7 @@ def _validate_policy_against_registry(
     for res_name, rp in policy.resources.items():
         res_def = registry.get(res_name)
         if res_def is None:
-            errors.append(
-                f"Policy references resource {res_name!r} which is not registered."
-            )
+            errors.append(f"Policy references resource {res_name!r} which is not registered.")
             continue
 
         valid_fields = set(res_def.field_names())
@@ -125,15 +123,11 @@ def _validate_policy_against_registry(
 
         for f in rp.allowed_fields:
             if f not in valid_fields:
-                errors.append(
-                    f"Policy for {res_name!r} references unknown allowed_field {f!r}."
-                )
+                errors.append(f"Policy for {res_name!r} references unknown allowed_field {f!r}.")
 
         for f in rp.denied_fields:
             if f not in valid_fields:
-                errors.append(
-                    f"Policy for {res_name!r} references unknown denied_field {f!r}."
-                )
+                errors.append(f"Policy for {res_name!r} references unknown denied_field {f!r}.")
 
         for rule in rp.row_rules:
             if rule.field not in valid_fields:
@@ -143,12 +137,12 @@ def _validate_policy_against_registry(
 
         if rp.max_rows <= 0:
             errors.append(
-                f"Policy for {res_name!r} has invalid max_rows={rp.max_rows} "
-                "(must be positive)."
+                f"Policy for {res_name!r} has invalid max_rows={rp.max_rows} (must be positive)."
             )
 
         tenant_key = res_def.tenant_key()
         from datafence.core.policy import ActionDecision
+
         has_allow_action = any(v == ActionDecision.ALLOW for v in rp.actions.values())
         if tenant_key and has_allow_action:
             err = _validate_tenant_row_rule(rp, tenant_key, res_name)
@@ -272,8 +266,7 @@ def _validate_decision(
 
     if rp is None:
         raise PolicyDeniedError(
-            f"Boundary rejects decision: no policy exists for resource "
-            f"{resource_name!r}."
+            f"Boundary rejects decision: no policy exists for resource {resource_name!r}."
         )
 
     # ------------------------------------------------------------------
@@ -282,8 +275,7 @@ def _validate_decision(
 
     if not decision.allowed_fields:
         raise PolicyError(
-            "Boundary rejects decision: allowed_fields is empty "
-            "in an ALLOW decision."
+            "Boundary rejects decision: allowed_fields is empty in an ALLOW decision."
         )
 
     # ------------------------------------------------------------------
@@ -293,14 +285,11 @@ def _validate_decision(
     try:
         row_limit = decision.row_limit.value
     except Exception as exc:
-        raise PolicyError(
-            f"Boundary rejects decision: row_limit is malformed — {exc}"
-        ) from exc
+        raise PolicyError(f"Boundary rejects decision: row_limit is malformed — {exc}") from exc
 
     if row_limit <= 0:
         raise PolicyError(
-            f"Boundary rejects decision: row_limit.value={row_limit!r} "
-            "must be positive."
+            f"Boundary rejects decision: row_limit.value={row_limit!r} must be positive."
         )
 
     # ------------------------------------------------------------------
@@ -342,11 +331,7 @@ def _validate_decision(
     # Invariant 1 — allowed_fields must exist in registry
     # ------------------------------------------------------------------
 
-    unknown_allowed = [
-        field
-        for field in decision.allowed_fields
-        if field not in valid_fields
-    ]
+    unknown_allowed = [field for field in decision.allowed_fields if field not in valid_fields]
 
     if unknown_allowed:
         raise PolicyError(
@@ -359,11 +344,7 @@ def _validate_decision(
     # Invariant 2 — RESTRICTED fields can never be authorized
     # ------------------------------------------------------------------
 
-    restricted_allowed = [
-        field
-        for field in decision.allowed_fields
-        if field in restricted_fields
-    ]
+    restricted_allowed = [field for field in decision.allowed_fields if field in restricted_fields]
 
     if restricted_allowed:
         raise PolicyError(
@@ -380,14 +361,10 @@ def _validate_decision(
     # become authorized again.
     # ------------------------------------------------------------------
 
-    effective_allowed_fields = (
-        set(rp.allowed_fields) - set(rp.denied_fields)
-    )
+    effective_allowed_fields = set(rp.allowed_fields) - set(rp.denied_fields)
 
     unauthorized_allowed = [
-        field
-        for field in decision.allowed_fields
-        if field not in effective_allowed_fields
+        field for field in decision.allowed_fields if field not in effective_allowed_fields
     ]
 
     if unauthorized_allowed:
@@ -431,16 +408,9 @@ def _validate_decision(
     # ------------------------------------------------------------------
 
     try:
-        required_predicates = (
-            rp.enforced_filter()
-            .resolve(principal)
-            .predicates
-        )
+        required_predicates = rp.enforced_filter().resolve(principal).predicates
     except Exception as exc:
-        raise PolicyError(
-            "Boundary could not resolve authoritative policy "
-            "row rules."
-        ) from exc
+        raise PolicyError("Boundary could not resolve authoritative policy row rules.") from exc
 
     actual_predicates = decision.enforced_filter.predicates
 
@@ -583,6 +553,8 @@ def _validate_decision(
             f"does not match frozen policy version "
             f"{frozen_policy.version!r}."
         )
+
+
 # ---------------------------------------------------------------------------
 # DataFenceBoundary
 # ---------------------------------------------------------------------------
@@ -615,7 +587,7 @@ class DataFenceBoundary:
 
     policy_engine: PolicyEngine
     _registry: ResourceRegistry
-    _frozen_policy: DataFencePolicy   # authoritative — boundary-owned, immutable
+    _frozen_policy: DataFencePolicy  # authoritative — boundary-owned, immutable
     _signing_key: bytes
     _capability_ttl_seconds: int
     _capability_audience: str
@@ -623,8 +595,7 @@ class DataFenceBoundary:
     def __init__(self, _guard: Any = None) -> None:
         if _guard is not _SENTINEL:
             raise TypeError(
-                "Do not instantiate DataFenceBoundary directly. "
-                "Use DataFenceBoundary.create()."
+                "Do not instantiate DataFenceBoundary directly. Use DataFenceBoundary.create()."
             )
 
     @classmethod
@@ -696,7 +667,7 @@ class DataFenceBoundary:
         boundary = cls(_SENTINEL)
         boundary.policy_engine = policy_engine
         boundary._registry = registry
-        boundary._frozen_policy = frozen_policy          # boundary-owned, immutable
+        boundary._frozen_policy = frozen_policy  # boundary-owned, immutable
         boundary._signing_key = signing_key
         boundary._capability_ttl_seconds = capability_ttl_seconds
         boundary._capability_audience = capability_audience
@@ -775,8 +746,7 @@ class DataFenceBoundary:
             policy_version=decision.policy_version,
             policy_decisions=list(decision.matched_rules),
             signing_key=self._signing_key,
-            expires_at=datetime.now(timezone.utc)
-            + timedelta(seconds=self._capability_ttl_seconds),
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self._capability_ttl_seconds),
             audience=self._capability_audience,
             obligations=dict(decision.obligations or {}),
         )

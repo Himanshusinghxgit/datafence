@@ -175,13 +175,9 @@ class ResourcePolicy:
         """Return the effective set of fields the agent may filter on."""
         if self.filterable_fields:
             # Use explicit list, minus denied fields
-            return frozenset(
-                f for f in self.filterable_fields if f not in self.denied_fields
-            )
+            return frozenset(f for f in self.filterable_fields if f not in self.denied_fields)
         # Fall back to allowed_fields minus denied_fields
-        return frozenset(
-            f for f in self.allowed_fields if f not in self.denied_fields
-        )
+        return frozenset(f for f in self.allowed_fields if f not in self.denied_fields)
 
 
 @dataclass
@@ -407,7 +403,8 @@ class DataFencePolicyEngine(PolicyEngine):
         effective_allowed = list(rp.allowed_fields)
         if res_def is not None:
             effective_allowed = [
-                f for f in effective_allowed
+                f
+                for f in effective_allowed
                 if res_def.fields.get(f) is None
                 or res_def.fields[f].classification != DataClassification.RESTRICTED
             ]
@@ -415,8 +412,7 @@ class DataFencePolicyEngine(PolicyEngine):
         # 3. Build projection (using classification-filtered allowed set)
         if requested_fields:
             safe = [
-                f for f in requested_fields
-                if f in effective_allowed and f not in rp.denied_fields
+                f for f in requested_fields if f in effective_allowed and f not in rp.denied_fields
             ]
         else:
             safe = [f for f in effective_allowed if f not in rp.denied_fields]
@@ -448,9 +444,14 @@ class DataFencePolicyEngine(PolicyEngine):
                 # Double-check RESTRICTED fields are never filterable
                 if res_def is not None:
                     field_def = res_def.fields.get(filter_field)
-                    if field_def is not None and field_def.classification == DataClassification.RESTRICTED:
+                    if (
+                        field_def is not None
+                        and field_def.classification == DataClassification.RESTRICTED
+                    ):
                         return PolicyDecision.deny(
-                            reasons=[f"Filtering on RESTRICTED field {filter_field!r} is not permitted"],
+                            reasons=[
+                                f"Filtering on RESTRICTED field {filter_field!r} is not permitted"
+                            ],
                             policy_name=self._policy.name,
                             policy_version=self._policy.version,
                         )

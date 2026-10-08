@@ -22,11 +22,13 @@ exceptions rather than DataFenceError subclasses.
 
 class DataFenceError(Exception):
     """Base exception for all DataFence errors."""
+
     pass
 
 
 class PolicyError(DataFenceError):
     """Raised when policy loading or evaluation fails unexpectedly."""
+
     pass
 
 
@@ -40,9 +42,11 @@ class PolicyDeniedError(DataFenceError):
 
 class ValidationError(DataFenceError):
     """Raised when request or schema validation fails."""
+
     pass
 
 
 class ConfigurationError(DataFenceError):
     """Raised when boundary or registry configuration is invalid."""
+
     pass

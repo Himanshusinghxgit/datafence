@@ -142,6 +142,7 @@ def main() -> None:
     )
     # Attacker tries to change the resource in the capability.
     import dataclasses
+
     forged = dataclasses.replace(legitimate, resource="employee_salaries")
     try:
         connector.execute(forged)
@@ -157,7 +158,7 @@ def main() -> None:
         principal,
         Intent("documents", Operation.READ, fields=["id", "title"]),
     )
-    verifier.verify(cap)   # raises on any failure
+    verifier.verify(cap)  # raises on any failure
     print(f"  ✓ Capability verified:  {cap.execution_id}")
     print(f"  Policy version:         {cap.policy_version}")
 

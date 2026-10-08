@@ -49,25 +49,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     reg = ResourceRegistry()
-    reg.register(ResourceDefinition(
-        "orders",
-        fields={
-            "id":        FieldDefinition("id", "integer"),
-            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-            "total":     FieldDefinition("total", "decimal"),
-            "status":    FieldDefinition("status", "string"),
+    reg.register(
+        ResourceDefinition(
+            "orders",
+            fields={
+                "id": FieldDefinition("id", "integer"),
+                "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                "total": FieldDefinition("total", "decimal"),
+                "status": FieldDefinition("status", "string"),
+            },
+            supported_operations=("read",),
+        )
+    )
+    pol = DataFencePolicy(
+        "p",
+        "1.0",
+        {
+            "orders": ResourcePolicy(
+                "orders",
+                actions={"read": ActionDecision.ALLOW},
+                allowed_fields=["id", "tenant_id", "total", "status"],
+                row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                max_rows=100,
+            )
         },
-        supported_operations=("read",),
-    ))
-    pol = DataFencePolicy("p", "1.0", {"orders": ResourcePolicy(
-        "orders",
-        actions={"read": ActionDecision.ALLOW},
-        allowed_fields=["id", "tenant_id", "total", "status"],
-        row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-        max_rows=100,
-    )})
+    )
     engine = DataFencePolicyEngine(pol, registry=reg)
     key = token_bytes(32)
     return DataFenceBoundary.create(engine, reg, key, capability_audience="test"), key
@@ -76,6 +85,7 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
 # ===========================================================================
 # A. Structural contract
 # ===========================================================================
+
 
 class TestBoundaryStructuralContract:
     def test_has_authorize(self) -> None:
@@ -104,6 +114,7 @@ class TestBoundaryStructuralContract:
 
     def test_boundary_source_has_no_db_imports(self) -> None:
         import datafence.core.boundary as mod
+
         src = inspect.getsource(mod)
         for lib in ("psycopg", "sqlite3", "boto3", "pyathena", "snowflake"):
             assert lib not in src
@@ -120,7 +131,8 @@ class TestBoundaryStructuralContract:
 
     def test_only_authorize_is_public(self) -> None:
         public = {
-            n for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
+            n
+            for n, _ in inspect.getmembers(DataFenceBoundary, predicate=callable)
             if not n.startswith("_") and n != "create"
         }
         assert public == {"authorize"}
@@ -132,17 +144,29 @@ class TestBoundaryStructuralContract:
     def test_weak_key_rejected(self) -> None:
         """Keys shorter than 32 bytes must be rejected."""
         reg = ResourceRegistry()
-        reg.register(ResourceDefinition("orders", fields={
-            "id": FieldDefinition("id", "integer"),
-            "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-        }, supported_operations=("read",)))
-        pol = DataFencePolicy("p", "1", {"orders": ResourcePolicy(
-            "orders",
-            actions={"read": ActionDecision.ALLOW},
-            allowed_fields=["id"],
-            row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
-            max_rows=10,
-        )})
+        reg.register(
+            ResourceDefinition(
+                "orders",
+                fields={
+                    "id": FieldDefinition("id", "integer"),
+                    "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
+                },
+                supported_operations=("read",),
+            )
+        )
+        pol = DataFencePolicy(
+            "p",
+            "1",
+            {
+                "orders": ResourcePolicy(
+                    "orders",
+                    actions={"read": ActionDecision.ALLOW},
+                    allowed_fields=["id"],
+                    row_rules=[RowRule("tenant_id", PredicateOperator.EQ, ":actor_tenant_id")],
+                    max_rows=10,
+                )
+            },
+        )
         engine = DataFencePolicyEngine(pol, registry=reg)
         with pytest.raises(ValueError, match="32"):
             DataFenceBoundary.create(engine, reg, b"short")
@@ -152,14 +176,17 @@ class TestBoundaryStructuralContract:
 # B. No legacy execution path
 # ===========================================================================
 
+
 class TestNoLegacyExecution:
     def test_no_legacy_datafence_class(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "DataFence")
 
     def test_no_actor_in_public_api(self) -> None:
         """Actor alias has been removed."""
         import datafence
+
         assert not hasattr(datafence, "Actor")
 
     def test_no_execute_plan(self) -> None:
@@ -168,18 +195,22 @@ class TestNoLegacyExecution:
 
     def test_no_allowed_request(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "AllowedRequest")
 
     def test_no_denied_request(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "DeniedRequest")
 
     def test_no_execution_plan(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "ExecutionPlan")
 
     def test_no_execution_result(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "ExecutionResult")
 
     def test_no_raw_sql_on_capability(self) -> None:
@@ -196,10 +227,12 @@ class TestNoLegacyExecution:
 
     def test_decision_not_in_public_api(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "Decision")
 
     def test_request_not_in_public_api(self) -> None:
         import datafence
+
         assert not hasattr(datafence, "Request")
 
     def test_capability_fields_are_tuples(self) -> None:
@@ -221,6 +254,7 @@ class TestNoLegacyExecution:
 # ===========================================================================
 # C. Capability serialization round-trip via CapabilityToken
 # ===========================================================================
+
 
 class TestCapabilityRoundTrip:
     def test_round_trip_preserves_signature(self) -> None:
@@ -250,7 +284,7 @@ class TestCapabilityRoundTrip:
         b, _ = _make_boundary()
         cap = b.authorize(
             Principal("u:1", "t-a", roles=("finance:read",)),
-            Intent("orders", Operation.READ, ["id"])
+            Intent("orders", Operation.READ, ["id"]),
         )
         data = json.loads(CapabilityToken.encode(cap))
         assert data["actor_roles"] == ["finance:read"]
@@ -276,9 +310,7 @@ class TestCapabilityRoundTrip:
 
     def test_round_trip_preserves_predicates(self) -> None:
         b, key = _make_boundary()
-        cap = b.authorize(
-            Principal("u", "t-a"), Intent("orders", Operation.READ)
-        )
+        cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
         token = CapabilityToken.encode(cap)
         restored = CapabilityToken.decode(token)
         # Tenant predicate must survive round-trip
@@ -286,11 +318,13 @@ class TestCapabilityRoundTrip:
 
     def test_malformed_token_raises(self) -> None:
         from datafence.core.capability import CapabilityVerificationError
+
         with pytest.raises(CapabilityVerificationError):
             CapabilityToken.decode("not-json")
 
     def test_wrong_version_rejected(self) -> None:
         from datafence.core.capability import CapabilityVerificationError
+
         b, _ = _make_boundary()
         cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
         data = json.loads(CapabilityToken.encode(cap))
@@ -300,6 +334,7 @@ class TestCapabilityRoundTrip:
 
     def test_missing_sig_field_raises(self) -> None:
         from datafence.core.capability import CapabilityVerificationError
+
         b, _ = _make_boundary()
         cap = b.authorize(Principal("u", "t-a"), Intent("orders", Operation.READ))
         data = json.loads(CapabilityToken.encode(cap))
@@ -324,6 +359,7 @@ class TestCapabilityRoundTrip:
 # ===========================================================================
 # D. Tamper detection
 # ===========================================================================
+
 
 class TestTamperDetection:
     def _cap_and_key(self) -> tuple[AuthorizedExecution, bytes, str]:

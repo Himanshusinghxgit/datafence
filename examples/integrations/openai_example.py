@@ -49,17 +49,18 @@ from datafence.integrations.openai_tool import DataFenceOpenAITool
 # 1. Build the registry — what resources exist
 # ---------------------------------------------------------------------------
 
+
 def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     registry = ResourceRegistry()
     registry.register(
         ResourceDefinition(
             "orders",
             fields={
-                "id":        FieldDefinition("id", "integer"),
+                "id": FieldDefinition("id", "integer"),
                 "tenant_id": FieldDefinition("tenant_id", "string", is_tenant_key=True),
-                "total":     FieldDefinition("total", "decimal"),
-                "status":    FieldDefinition("status", "string"),
-                "merchant":  FieldDefinition("merchant", "string"),
+                "total": FieldDefinition("total", "decimal"),
+                "status": FieldDefinition("status", "string"),
+                "merchant": FieldDefinition("merchant", "string"),
             },
             supported_operations=("read",),
         )
@@ -86,7 +87,9 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
     # 3. Create the boundary — keep the key secret in production
     signing_key = token_bytes(32)
     boundary = DataFenceBoundary.create(
-        engine, registry, signing_key,
+        engine,
+        registry,
+        signing_key,
         capability_audience="orders-service",
     )
     return boundary, signing_key
@@ -95,6 +98,7 @@ def _make_boundary() -> tuple[DataFenceBoundary, bytes]:
 # ---------------------------------------------------------------------------
 # Example A: direct tool call (no live OpenAI call required)
 # ---------------------------------------------------------------------------
+
 
 def example_direct_tool_call() -> None:
     """
@@ -117,12 +121,14 @@ def example_direct_tool_call() -> None:
     print(f"   Description     : {spec['function']['description'][:70]}...")
 
     # Simulate the arguments the model would produce
-    model_arguments = json.dumps({
-        "resource": "orders",
-        "fields": ["id", "total", "status"],
-        "filters": {"merchant": "Acme Corp"},
-        "limit": 5,
-    })
+    model_arguments = json.dumps(
+        {
+            "resource": "orders",
+            "fields": ["id", "total", "status"],
+            "filters": {"merchant": "Acme Corp"},
+            "limit": 5,
+        }
+    )
 
     # Principal from YOUR auth layer — never from model output
     principal = Principal(id="user:alice", tenant_id="tenant-acme")
@@ -157,6 +163,7 @@ def example_direct_tool_call() -> None:
 # ---------------------------------------------------------------------------
 # Example B: live OpenAI call (requires OPENAI_API_KEY)
 # ---------------------------------------------------------------------------
+
 
 def example_with_live_openai() -> None:
     """
