@@ -68,6 +68,7 @@ from uuid import uuid4
 
 from datafence.core.capability import MIN_KEY_BYTES, AuthorizedExecution
 from datafence.core.policy import (
+    ActionDecision,
     DataFencePolicy,
     DataFencePolicyEngine,
     PolicyEffect,
@@ -294,29 +295,52 @@ def _validate_decision(
         )
 
     # ---- Invariant 3 (policy field ceiling) ----
+    
     rp = frozen_policy.resource_policy(resource_name)
-    if rp is not None:
-        effective_ceiling = frozenset(
-            f for f in rp.allowed_fields
-            if f not in rp.denied_fields and f not in restricted_fields
+    if rp is None:
+        raise PolicyDeniedError(
+            f"Boundary rejects decision: no policy exists for resource "
+            f"{resource_name!r}."
         )
-        policy_unauthorized = [
-            f for f in decision.allowed_fields if f not in effective_ceiling
-        ]
-        if policy_unauthorized:
-            raise PolicyError(
-                f"Boundary rejects decision: allowed_fields contains fields outside "
-                f"the policy ceiling for {resource_name!r}: {policy_unauthorized}. "
-                "A PolicyEngine must not authorize fields beyond the frozen policy."
-            )
 
-        # ---- Invariant 6 (row-limit ceiling) ----
-        if _row_limit > rp.max_rows:
-            raise PolicyError(
-                f"Boundary rejects decision: row_limit.value={_row_limit} exceeds "
-                f"policy max_rows={rp.max_rows} for {resource_name!r}."
-            )
+    # The final boundary must never allow an operation that the
+    # authoritative policy denies or leaves implicitly denied.
+    if rp.action_decision(op_str) != ActionDecision.ALLOW:
+        raise PolicyDeniedError(
+            f"Boundary rejects decision: operation {op_str!r} is not "
+            f"allowed by the authoritative policy for resource "
+            f"{resource_name!r}."
+        )
 
+    # ---- Policy row-rule ceiling ----
+    # Every authoritative policy row rule must survive into the
+    # engine's enforced_filter after actor references are resolved.
+    try:
+        required_predicates = (
+            rp.enforced_filter().resolve(principal).predicates
+        )
+    except Exception as exc:
+        raise PolicyError(
+            "Boundary could not resolve authoritative policy row rules."
+        ) from exc
+
+    actual_predicates = decision.enforced_filter.predicates
+
+    for required in required_predicates:
+        present = any(
+            actual.field.name == required.field.name
+            and actual.operator == required.operator
+            and actual.value == required.value
+            for actual in actual_predicates
+        )
+
+        if not present:
+            raise PolicyError(
+                "Boundary rejects decision: a mandatory policy row rule "
+                f"is missing or weakened: "
+                f"{required.field.name!r} {required.operator.value!r} "
+                f"{required.value!r}."
+            )
     # ---- Invariants 4 + 5 (enforced_filter fields and tenant predicate) ----
     tenant_key = res_def.tenant_key()
     tenant_predicate_found = False
@@ -613,8 +637,8 @@ class DataFenceBoundary:
 
     @property
     def frozen_policy(self) -> DataFencePolicy:
-        """Return the boundary-owned frozen policy snapshot."""
-        return self._frozen_policy
+        """Return a defensive copy of the boundary-owned policy snapshot."""
+        return copy.deepcopy(self._frozen_policy)
 
 
 # ---------------------------------------------------------------------------
