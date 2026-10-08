@@ -172,7 +172,7 @@ from datafence.errors import (
     ValidationError,
 )
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = [
     # ── Core boundary ────────────────────────────────────────────────────
